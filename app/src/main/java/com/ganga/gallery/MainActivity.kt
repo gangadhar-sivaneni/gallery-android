@@ -77,7 +77,7 @@ class MainActivity : FragmentActivity() {
             val dark = isDarkTheme(vm)
             val screen = vm.stack.last()
             val inViewer = screen is Screen.Viewer
-            LaunchedEffect(inViewer) { if (!inViewer) vm.gestureBrightness = null } // swipe brightness ends with the viewer
+            LaunchedEffect(inViewer) { if (!inViewer) vm.phoneBrightnessUsed = false }
             val private = vm.secureScreen || (screen as? Screen.Grid)?.source == Source.Vault ||
                 (screen as? Screen.Viewer)?.source == Source.Vault
             SideEffect {
@@ -91,8 +91,7 @@ class MainActivity : FragmentActivity() {
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 window.attributes = window.attributes.apply {
                     screenBrightness = when {
-                        inViewer && vm.gestureBrightness != null -> vm.gestureBrightness!!
-                        inViewer && vm.maxBrightness -> 1f
+                        inViewer && vm.maxBrightness && !vm.phoneBrightnessUsed -> 1f
                         else -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                     }
                 }
@@ -110,6 +109,16 @@ class MainActivity : FragmentActivity() {
     override fun onStart() {
         super.onStart()
         vm.setForeground(true)
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        vm.inPip = isInPictureInPictureMode
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (android.os.Build.VERSION.SDK_INT < 31 && vm.pipAuto) vm.pipParams?.let { runCatching { enterPictureInPictureMode(it) } }
     }
 
     override fun onStop() {

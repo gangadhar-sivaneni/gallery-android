@@ -183,8 +183,12 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     var imageEpoch by mutableStateOf(0); private set
     /** A grid is in selection mode; Home hides its tab bar so the action bar takes its place. */
     var selectionActive by mutableStateOf(false)
-    /** Brightness set by swiping on a video; only applies while the viewer is open. */
-    var gestureBrightness by mutableStateOf<Float?>(null)
+    /** Set once the phone brightness was swiped in the viewer, so "max brightness" stops overriding it. */
+    var phoneBrightnessUsed by mutableStateOf(false)
+    /** Picture-in-picture: whether the window is in PiP now, and the params of the open video (null when none). */
+    var inPip by mutableStateOf(false)
+    var pipParams: android.app.PictureInPictureParams? = null
+    var pipAuto = false // Android 11 has no auto-enter; MainActivity enters PiP on Home while a video plays
 
     // --- app settings ---
     var theme by mutableStateOf(enumPref("theme", ThemeMode.SYSTEM)); private set

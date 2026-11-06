@@ -49,6 +49,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.roundToInt
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.unit.IntOffset
 
 /** Everything the editor changes. Crop is stored as fractions of the rotated/flipped image, so it applies at any resolution. */
 data class EditOps(
@@ -277,7 +282,7 @@ fun Editor(vm: GalleryViewModel, m: Media, ask: Ask, onBack: () -> Unit) {
             }
         },
     ) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize().padding(20.dp), Alignment.Center) {
+        Box(Modifier.padding(pad).fillMaxSize(), Alignment.Center) { // CropView keeps its own margin
             val s = shown
             if (s == null) CircularProgressIndicator()
             else CropView(remember(s) { s.asImageBitmap() }, crop, ratio, interactive = tool == Tool.CROP, filter = composeFilter) { crop = it }
@@ -372,7 +377,7 @@ fun WallpaperCrop(vm: GalleryViewModel, m: Media, which: Int, onBack: () -> Unit
             }
         },
     ) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize().padding(20.dp), Alignment.Center) {
+        Box(Modifier.padding(pad).fillMaxSize(), Alignment.Center) { // CropView keeps its own margin
             val b = img
             if (b == null) CircularProgressIndicator()
             else CropView(remember(b) { b.asImageBitmap() }, crop, ratio, interactive = true, filter = ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix())) { crop = it }
@@ -380,27 +385,48 @@ fun WallpaperCrop(vm: GalleryViewModel, m: Media, which: Int, onBack: () -> Unit
     }
 }
 
-/** Shows the image fitted to the box, dims outside [crop], and lets you drag corners or move the box. */
+/**
+ * Shows the image, dims outside [crop], and lets you drag corners or move the box. While cropping, letting go
+ * zooms and pans so the crop fills the view (crop stays in image pixels; only the display transform changes).
+ */
 @Composable
 internal fun CropView(img: ImageBitmap, crop: Rect, ratio: Float?, interactive: Boolean, filter: ColorFilter, onCrop: (Rect) -> Unit) {
     var box by remember { mutableStateOf(IntSize.Zero) }
     val touch = with(LocalDensity.current) { 36.dp.toPx() }
-    val scale = if (box == IntSize.Zero) 1f else min(box.width.toFloat() / img.width, box.height.toFloat() / img.height)
-    val ox = (box.width - img.width * scale) / 2
-    val oy = (box.height - img.height * scale) / 2
-    val minSize = 48f / scale
+    val margin = with(LocalDensity.current) { 20.dp.toPx() } // room round the zoomed box to grab corners / drag outwards
+    val full = Rect(0f, 0f, img.width.toFloat(), img.height.toFloat())
+    // part of the image (in image pixels) fitted inside the margins; the crop when cropping, else the whole image
+    val view = remember(img) { Animatable(full, Rect.VectorConverter) }
+    var dragging by remember { mutableStateOf(false) }
+    LaunchedEffect(img, crop, interactive, dragging) {
+        if (!dragging) view.animateTo(if (interactive && crop.width >= 1f && crop.height >= 1f) crop else full)
+    }
+    val v = view.value
+    val availW = (box.width - 2 * margin).coerceAtLeast(1f); val availH = (box.height - 2 * margin).coerceAtLeast(1f)
+    val scale = if (box == IntSize.Zero) 1f else min(availW / v.width, availH / v.height)
+    val ox = box.width / 2f - v.center.x * scale
+    val oy = box.height / 2f - v.center.y * scale
+    // min crop is 48px at the un-zoomed fit, so repeated zooming can't shrink it to nothing
+    val minSize = 48f / min(availW / img.width, availH / img.height)
+    val xf by rememberUpdatedState(floatArrayOf(scale, ox, oy, minSize))
     val currentCrop by rememberUpdatedState(crop)
     val fixed = when (ratio) { null -> null; -1f -> img.width.toFloat() / img.height; else -> ratio }
     Box(
-        Modifier.fillMaxSize().onSizeChanged { box = it }
+        Modifier.fillMaxSize().clipToBounds().onSizeChanged { box = it }
             .then(
-                if (!interactive) Modifier else Modifier.pointerInput(img.width, img.height, fixed, scale) {
+                if (!interactive) Modifier else Modifier.pointerInput(img, fixed) {
                     var mode = -1 // 0..3 corners (tl, tr, br, bl), 4 = move
                     // running rect for this drag: several move events arrive between frames, so each must
                     // build on the previous one, not on the last recomposed value (which made drags lag/stick)
                     var work = currentCrop
+                    // view transform frozen for the whole drag (the zoom only animates after release)
+                    var scale = 1f; var ox = 0f; var oy = 0f; var minSize = 1f
                     detectDragGestures(
+                        onDragEnd = { dragging = false },
+                        onDragCancel = { dragging = false },
                         onDragStart = { p ->
+                            dragging = true
+                            xf.let { scale = it[0]; ox = it[1]; oy = it[2]; minSize = it[3] }
                             work = currentCrop
                             val c = work
                             val pts = listOf(c.topLeft, c.topRight, c.bottomRight, c.bottomLeft).map { Offset(ox + it.x * scale, oy + it.y * scale) }
@@ -444,8 +470,11 @@ internal fun CropView(img: ImageBitmap, crop: Rect, ratio: Float?, interactive: 
                 },
             ),
     ) {
-        Image(img, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit, colorFilter = filter)
         Canvas(Modifier.fillMaxSize()) {
+            drawImage(
+                img, dstOffset = IntOffset(ox.roundToInt(), oy.roundToInt()),
+                dstSize = IntSize((img.width * scale).roundToInt(), (img.height * scale).roundToInt()), colorFilter = filter,
+            )
             val r = Rect(ox + crop.left * scale, oy + crop.top * scale, ox + crop.right * scale, oy + crop.bottom * scale)
             val dim = Color.Black.copy(alpha = .6f)
             drawRect(dim, Offset(ox, oy), Size(img.width * scale, r.top - oy))

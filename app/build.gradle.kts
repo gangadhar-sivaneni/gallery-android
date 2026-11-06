@@ -11,8 +11,8 @@ android {
         applicationId = "com.ganga.gallery"
         minSdk = 30 // MediaStore trash/favorite APIs
         targetSdk = 36
-        versionCode = 3
-        versionName = "2.1"
+        versionCode = 4
+        versionName = "2.2"
     }
     buildTypes {
         release {
@@ -37,6 +37,7 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-svg:3.6.3")
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
+    implementation("androidx.media3:media3-session:1.11.1") // play/pause buttons in the picture-in-picture window
     implementation("androidx.media3:media3-transformer:1.11.1")
     implementation("androidx.media3:media3-effect:1.11.1")
     implementation("androidx.exifinterface:exifinterface:1.4.2")

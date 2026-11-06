@@ -116,6 +116,7 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
     var speed by remember { mutableFloatStateOf(1f) }
     var aspectMenu by remember { mutableStateOf(false) }
     var speedMenu by remember { mutableStateOf(false) }
+    val pipSupported = remember { ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE) }
 
     BackHandler(!slideshow && !videoLocked) { leave() }
     BackHandler(slideshow) { slideshow = false; chrome = true }
@@ -154,9 +155,9 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
             }
         }
 
-        if (videoLocked) LockOverlay { videoLocked = false; chrome = true }
+        if (videoLocked && !vm.inPip) LockOverlay { videoLocked = false; chrome = true }
 
-        AnimatedVisibility(chrome && !videoLocked, Modifier.align(Alignment.TopCenter), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(chrome && !videoLocked && !vm.inPip, Modifier.align(Alignment.TopCenter), enter = fadeIn(), exit = fadeOut()) {
             TopAppBar(
                 navigationIcon = { IconButton(leave) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 title = {
@@ -187,6 +188,9 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
                                     DropdownMenuItem({ Text(a.label) }, { aspectMenu = false; aspect = a }, leadingIcon = { RadioButton(aspect == a, null) })
                                 }
                             }
+                        }
+                        if (pipSupported) IconButton({ vm.pipParams?.let { runCatching { activity.enterPictureInPictureMode(it) } } }) {
+                            Icon(Icons.Outlined.PictureInPictureAlt, "Picture in picture")
                         }
                         IconButton({ videoLocked = true; chrome = false }) { Icon(Icons.Outlined.Lock, "Lock controls") }
                     } else {
@@ -257,7 +261,7 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
         }
 
         // videos use the player's own bottom controls; photos get our action bar
-        AnimatedVisibility(chrome && !cur.isVideo, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(chrome && !cur.isVideo && !vm.inPip, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
             Row(
                 Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(.75f))))
                     .navigationBarsPadding().padding(top = 16.dp, bottom = 8.dp),
@@ -412,24 +416,56 @@ private fun VideoPage(
     val ctx = LocalContext.current
     val player = remember(m.uri) {
         ExoPlayer.Builder(ctx).setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build().apply {
-            setMediaItem(MediaItem.fromUri(m.uri))
+            // a same-named .srt/.vtt/.ass next to the video is offered as subtitles (needs All files access to read)
+            setMediaItem(MediaItem.Builder().setUri(m.uri).setSubtitleConfigurations(sidecarSubtitles(m)).build())
             vm.videoPosition(m).takeIf { it > 0 }?.let { seekTo(it); vm.toast("Resumed at ${duration(it)}") }
             prepare()
             playWhenReady = vm.autoplay
             repeatMode = if (vm.loopVideos) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         }
     }
+    val activity = ctx as Activity
+    val pipSupported = remember { ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE) }
+    var isPlaying by remember { mutableStateOf(player.playWhenReady) }
+    var videoSize by remember { mutableStateOf(player.videoSize) }
+    var hasSubs by remember { mutableStateOf(false) }
     DisposableEffect(player) {
+        // media session: gives the PiP window its play/pause buttons
+        val session = runCatching { androidx.media3.session.MediaSession.Builder(ctx, player).setId("video-${m.id}").build() }.getOrNull()
+        val l = object : Player.Listener {
+            override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
+            override fun onVideoSizeChanged(v: androidx.media3.common.VideoSize) { videoSize = v }
+            override fun onTracksChanged(t: androidx.media3.common.Tracks) { hasSubs = t.containsType(androidx.media3.common.C.TRACK_TYPE_TEXT) }
+        }
+        player.addListener(l)
         onDispose {
             vm.saveVideoPosition(m, player.currentPosition, player.duration)
+            vm.pipParams = null; vm.pipAuto = false
+            if (pipSupported && android.os.Build.VERSION.SDK_INT >= 31) runCatching {
+                activity.setPictureInPictureParams(android.app.PictureInPictureParams.Builder().setAutoEnterEnabled(false).build())
+            }
+            player.removeListener(l)
+            session?.release()
             player.release()
         }
     }
+    // PiP shape follows the video; going Home while it plays drops into PiP
+    LaunchedEffect(isPlaying, videoSize) {
+        if (!pipSupported) return@LaunchedEffect
+        val r = if (videoSize.width > 0 && videoSize.height > 0) videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height else 16f / 9f
+        val b = android.app.PictureInPictureParams.Builder()
+            .setAspectRatio(android.util.Rational((r.coerceIn(0.42f, 2.38f) * 1000).toInt(), 1000))
+        if (android.os.Build.VERSION.SDK_INT >= 31) b.setAutoEnterEnabled(isPlaying).setSeamlessResizeEnabled(true)
+        val p = b.build()
+        vm.pipParams = p; vm.pipAuto = isPlaying
+        runCatching { activity.setPictureInPictureParams(p) }
+    }
     LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
-        player.pause()
+        if (!activity.isInPictureInPictureMode) player.pause() // keep playing in the PiP window
         vm.saveVideoPosition(m, player.currentPosition, player.duration)
     }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { player.pause() } // PiP window closed
     // The video always fills the screen. Only the player's control strip is kept clear of the nav bar,
     // using the bar's size *ignoring visibility* so nothing moves when tapping shows/hides the bars.
     val density = LocalDensity.current
@@ -441,13 +477,14 @@ private fun VideoPage(
     // gestures: hold = 2x, swipe up/down on the left = brightness, on the right = volume.
     // Taps and sideways swipes are left alone so the controls and the pager still work.
     val audio = remember { ctx.getSystemService(android.media.AudioManager::class.java) }
-    val window = (ctx as Activity).window
+    val window = activity.window
     val curSpeed by rememberUpdatedState(speed)
     var fast by remember { mutableStateOf(false) }
     var hudOn by remember { mutableStateOf(false) }
     var hudLeft by remember { mutableStateOf(true) }
     var hudLevel by remember { mutableFloatStateOf(0f) }
-    val gestures = if (locked) Modifier else Modifier.pointerInput(Unit) {
+    var askWrite by remember { mutableStateOf(false) }
+    val gestures = if (locked || vm.inPip) Modifier else Modifier.pointerInput(Unit) {
         val edge = 56.dp.toPx() // keep clear of the status bar pull-down and the seek bar
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
@@ -475,11 +512,18 @@ private fun VideoPage(
                 } finally { fast = false; player.setPlaybackSpeed(curSpeed) } // also if the gesture is cancelled
             } else if (moved && kotlin.math.abs(drag.y) > kotlin.math.abs(drag.x)) {
                 val left = down.position.x < size.width / 2f
+                if (left && !android.provider.Settings.System.canWrite(ctx)) { askWrite = true; return@awaitEachGesture }
                 val max = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
-                var level = if (left) vm.gestureBrightness ?: window.attributes.screenBrightness.takeIf { it >= 0f }
-                    ?: (android.provider.Settings.System.getInt(ctx.contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS, 128) / 255f)
+                val cr = ctx.contentResolver
+                var level = if (left) android.provider.Settings.System.getInt(cr, android.provider.Settings.System.SCREEN_BRIGHTNESS, 128) / 255f
                 else audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() / max
                 hudLeft = left; hudLevel = level; hudOn = true
+                if (left) {
+                    // phone brightness, like the quick-settings slider: auto-brightness off, any "max brightness" override dropped
+                    android.provider.Settings.System.putInt(cr, android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE, android.provider.Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+                    vm.phoneBrightnessUsed = true
+                    window.attributes = window.attributes.apply { screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE }
+                }
                 var lastY = down.position.y + drag.y
                 try { do {
                     val e = awaitPointerEvent(PointerEventPass.Initial)
@@ -489,7 +533,7 @@ private fun VideoPage(
                     level = (level - (c.position.y - lastY) / (size.height * 0.6f)).coerceIn(0f, 1f)
                     lastY = c.position.y
                     hudLevel = level
-                    if (left) vm.gestureBrightness = level.coerceAtLeast(0.01f)
+                    if (left) android.provider.Settings.System.putInt(cr, android.provider.Settings.System.SCREEN_BRIGHTNESS, (level * 255).toInt().coerceIn(1, 255))
                     else audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, kotlin.math.round(level * max).toInt(), 0)
                 } while (c.pressed) } finally { hudOn = false } // never leave the indicator stuck on screen
             }
@@ -506,8 +550,9 @@ private fun VideoPage(
             },
             update = { pv ->
                 pv.resizeMode = aspect.mode
-                pv.useController = !locked
-                if (locked) pv.hideController()
+                pv.useController = !locked && !vm.inPip
+                pv.setShowSubtitleButton(hasSubs) // CC button only for videos that have subtitles
+                if (locked || vm.inPip) pv.hideController()
                 // pad the controls, but stretch the dark scrim back over the padding so it covers the whole screen
                 (pv.findViewById<View>(androidx.media3.ui.R.id.exo_bottom_bar)?.parent as? android.view.ViewGroup)?.let { root ->
                     root.setPadding(padL, 0, padR, padB)
@@ -522,40 +567,64 @@ private fun VideoPage(
             },
             modifier = aspect.ratio?.let { Modifier.aspectRatio(it) } ?: Modifier.fillMaxSize(),
         )
-        // only the control in use is shown, and only while it is being used
+        if (askWrite) AlertDialog(
+            onDismissRequest = { askWrite = false },
+            title = { Text("Control phone brightness") },
+            text = { Text("To change the phone brightness by swiping, allow Gallery to \"Modify system settings\" on the next screen.") },
+            confirmButton = {
+                TextButton({
+                    askWrite = false
+                    runCatching {
+                        ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS, android.net.Uri.parse("package:${ctx.packageName}")))
+                    }
+                }) { Text("Allow") }
+            },
+            dismissButton = { TextButton({ askWrite = false }) { Text("Not now") } },
+        )
+        // only the control in use is shown, and only while it is being used: icon, thin bar, number, no box
+        val shade = androidx.compose.ui.graphics.Shadow(Color.Black.copy(.8f), Offset(0f, 1f), 6f)
         AnimatedVisibility(fast, Modifier.align(Alignment.TopCenter).padding(top = 72.dp), enter = fadeIn(), exit = fadeOut()) {
-            Row(
-                Modifier.background(Color.Black.copy(.6f), RoundedCornerShape(50)).padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.FastForward, null, tint = Color.White, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("2x speed", color = Color.White, style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.width(4.dp))
+                Text("2x", color = Color.White, style = MaterialTheme.typography.titleSmall.copy(shadow = shade))
             }
         }
         AnimatedVisibility(
-            hudOn, Modifier.align(if (hudLeft) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = 40.dp),
+            hudOn && !vm.inPip, Modifier.align(if (hudLeft) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = 36.dp),
             enter = fadeIn(), exit = fadeOut(),
         ) {
-            Column(
-                Modifier.background(Color.Black.copy(.6f), RoundedCornerShape(24.dp)).padding(horizontal = 12.dp, vertical = 14.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     when {
                         hudLeft -> Icons.Outlined.BrightnessMedium
                         hudLevel == 0f -> Icons.AutoMirrored.Outlined.VolumeOff
                         else -> Icons.AutoMirrored.Outlined.VolumeUp
                     },
-                    null, tint = Color.White,
+                    null, tint = Color.White, modifier = Modifier.size(22.dp),
                 )
-                Spacer(Modifier.height(10.dp))
-                Box(Modifier.width(6.dp).height(120.dp).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(.25f)), Alignment.BottomCenter) {
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.width(3.dp).height(110.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(.3f)), Alignment.BottomCenter) {
                     Box(Modifier.fillMaxWidth().fillMaxHeight(hudLevel).background(Color.White))
                 }
-                Spacer(Modifier.height(8.dp))
-                Text("${(hudLevel * 100).toInt()}", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(6.dp))
+                Text("${(hudLevel * 100).toInt()}", color = Color.White, style = MaterialTheme.typography.labelMedium.copy(shadow = shade))
             }
         }
     }
 }
+
+/** Subtitle files with the video's name in the same folder (movie.mp4 + movie.srt). Empty when none or unreadable. */
+private fun sidecarSubtitles(m: Media): List<MediaItem.SubtitleConfiguration> = runCatching {
+    val dir = java.io.File(android.os.Environment.getExternalStorageDirectory(), m.path)
+    val base = m.name.substringBeforeLast('.')
+    listOf(
+        "srt" to androidx.media3.common.MimeTypes.APPLICATION_SUBRIP, "vtt" to androidx.media3.common.MimeTypes.TEXT_VTT,
+        "ass" to androidx.media3.common.MimeTypes.TEXT_SSA, "ssa" to androidx.media3.common.MimeTypes.TEXT_SSA,
+    ).mapNotNull { (ext, mime) ->
+        java.io.File(dir, "$base.$ext").takeIf { it.canRead() }?.let {
+            MediaItem.SubtitleConfiguration.Builder(android.net.Uri.fromFile(it)).setMimeType(mime)
+                .setLabel(ext.uppercase()).setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT).build()
+        }
+    }
+}.getOrDefault(emptyList())

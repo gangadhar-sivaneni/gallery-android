@@ -46,7 +46,9 @@ Gallery works only with what is on your phone. It has **no internet permission, 
 - Video player:
   - skip 10 seconds back or forward
   - hold the screen for **2x speed**
-  - swipe the left side for **brightness** and the right side for **volume**
+  - swipe the left side for **phone brightness** and the right side for **volume**
+  - **picture-in-picture**: keeps playing in a floating window when you press Home
+  - **subtitles**: built-in tracks, or a same-named `.srt` / `.vtt` / `.ass` file next to the video
   - change speed and aspect ratio, and lock the screen against touches
   - resumes where you left off
 - Photo details, including camera and EXIF information.
@@ -77,8 +79,9 @@ Gallery works only with what is on your phone. It has **no internet permission, 
 | Photos and videos | To show your media |
 | Media location | To show where a photo was taken in Properties |
 | Set wallpaper | For **Set as wallpaper** |
+| Modify system settings *(optional)* | Lets the brightness swipe on videos change the phone brightness |
 | Manage media *(optional)* | Lets rotate, delete and move work without a confirmation popup each time |
-| All files access *(optional)* | Shows media that other apps (for example WhatsApp) have hidden |
+| All files access *(optional)* | Shows media that other apps (for example WhatsApp) have hidden, and reads subtitle files |
 
 There is no internet permission, so nothing ever leaves your phone.
 
