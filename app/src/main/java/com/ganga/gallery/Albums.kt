@@ -34,6 +34,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import coil3.compose.AsyncImage
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -47,35 +49,20 @@ fun Albums(vm: GalleryViewModel, ask: Ask) {
         Smart.entries.map { it to vm.collectionCover(it) }.filter { it.second.second > 0 }
     }
     var menu by remember { mutableStateOf(false) }
-    var sortMenu by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<AlbumDlg?>(null) }
     val landscape = isLandscape()
+    val grid = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Albums", fontWeight = FontWeight.SemiBold)
-                        Text("${albums.size} albums", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                },
+            AppBar(
+                large = true,
+                title = { Text("Albums", maxLines = 1) },
                 actions = {
-                    Box {
-                        IconButton({ sortMenu = true }) { Icon(Icons.AutoMirrored.Outlined.Sort, "Sort albums") }
-                        AppMenu(sortMenu, { sortMenu = false }) {
-                            AlbumSort.entries.forEach { s ->
-                                DropdownMenuItem(
-                                    { Text(s.label) }, { sortMenu = false; vm.changeAlbumSort(s) },
-                                    leadingIcon = { RadioButton(vm.albumSort == s, null) },
-                                )
-                            }
-                        }
-                    }
-                    IconButton({ vm.changeAlbumList(!vm.albumList) }) {
-                        Icon(if (vm.albumList) Icons.Outlined.GridView else Icons.AutoMirrored.Outlined.ViewList, "Change view type")
+                    HeaderButton(if (vm.albumList) Icons.Outlined.GridView else Icons.AutoMirrored.Outlined.ViewList, "Change view type") {
+                        vm.changeAlbumList(!vm.albumList)
                     }
                     Box {
-                        IconButton({ menu = true }) { Icon(Icons.Outlined.MoreVert, "More options") }
+                        HeaderButton(Icons.Outlined.MoreVert, "More options") { menu = true }
                         AppMenu(menu, { menu = false }) {
                             MenuItem("Open camera", Icons.Outlined.PhotoCamera) { menu = false; openCamera(ctx) }
                             if (!vm.albumList) {
@@ -89,7 +76,6 @@ fun Albums(vm: GalleryViewModel, ask: Ask) {
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
     ) { pad ->
@@ -104,26 +90,13 @@ fun Albums(vm: GalleryViewModel, ask: Ask) {
         }
         LazyVerticalGrid(
             GridCells.Fixed(cols),
-            contentPadding = PaddingValues(16.dp + pad.calculateStartPadding(LocalLayoutDirection.current), pad.calculateTopPadding() + 4.dp, 16.dp + pad.calculateEndPadding(LocalLayoutDirection.current), pad.calculateBottomPadding() + 16.dp),
+            state = grid,
+            contentPadding = PaddingValues(16.dp + pad.calculateStartPadding(LocalLayoutDirection.current), pad.calculateTopPadding() + 4.dp, 16.dp + pad.calculateEndPadding(LocalLayoutDirection.current), pad.calculateBottomPadding() + LocalBottomBarSpace.current + 16.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(if (vm.albumList) 4.dp else 16.dp),
         ) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                val cards = listOf(
-                    Quick(Icons.Outlined.FavoriteBorder, "Favorites", "$favCount", Color(0xFFE8506A)) { vm.stack.add(Screen.Grid(Source.Favorites)) },
-                    Quick(Icons.Outlined.Videocam, "Videos", "$vidCount", Color(0xFF7B61FF)) { vm.stack.add(Screen.Grid(Source.Videos)) },
-                    Quick(Icons.Outlined.Lock, "Private", "PIN protected", Color(0xFF00A884)) {
-                        vm.stack.add(Screen.Grid(Source.Vault))
-                    },
-                    Quick(Icons.Outlined.Delete, "Trash", "${vm.trash.size}", Color(0xFFF29900)) { vm.stack.add(Screen.Grid(Source.Trash)) },
-                )
-                // 2x2 in portrait, one row of 4 in landscape
-                Column(Modifier.padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    cards.chunked(if (landscape) 4 else 2).forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) { row.forEach { QuickCard(it, Modifier.weight(1f)) } }
-                    }
-                }
-            }
+            item(span = { GridItemSpan(maxLineSpan) }) { Header("My albums") }
+            items(albums, key = { it.id }) { a -> AlbumItem(vm, a, ask) { dialog = it } }
             if (vm.showCollections && collections.isNotEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) { Header("Collections") }
                 item(span = { GridItemSpan(maxLineSpan) }) {
@@ -134,8 +107,17 @@ fun Albums(vm: GalleryViewModel, ask: Ask) {
                     }
                 }
             }
-            item(span = { GridItemSpan(maxLineSpan) }) { Header("Albums · ${vm.albumSort.label.lowercase()}") }
-            items(albums, key = { it.id }) { a -> AlbumItem(vm, a, ask) { dialog = it } }
+            item(span = { GridItemSpan(maxLineSpan) }) { Header("More") }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                    Column(Modifier.padding(vertical = 4.dp)) {
+                        MoreRow(Icons.Outlined.FavoriteBorder, "Favourites", "$favCount") { vm.stack.add(Screen.Grid(Source.Favorites)) }
+                        MoreRow(Icons.Outlined.Videocam, "Videos", "$vidCount") { vm.stack.add(Screen.Grid(Source.Videos)) }
+                        MoreRow(Icons.Outlined.Shield, "Private", null) { vm.stack.add(Screen.Grid(Source.Vault)) }
+                        MoreRow(Icons.Outlined.Delete, "Recently deleted", "${vm.trash.size}", last = true) { vm.stack.add(Screen.Grid(Source.Trash)) }
+                    }
+                }
+            }
         }
     }
     when (val d = dialog) {
@@ -150,33 +132,18 @@ private sealed interface AlbumDlg {
     data class Cover(val a: Album) : AlbumDlg
 }
 
-private data class Quick(val icon: ImageVector, val label: String, val count: String, val accent: Color, val onClick: () -> Unit)
 
 @Composable
 private fun Header(text: String) = Text(
-    text, Modifier.padding(top = 8.dp, start = 2.dp), style = MaterialTheme.typography.titleSmall,
-    fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant,
+    text, Modifier.padding(top = 18.dp, start = 2.dp), style = MaterialTheme.typography.titleLarge.copy(fontSize = androidx.compose.ui.unit.TextUnit(20f, androidx.compose.ui.unit.TextUnitType.Sp)),
+    fontWeight = FontWeight.Normal, color = MaterialTheme.colorScheme.onSurface,
 )
 
-@Composable
-private fun QuickCard(q: Quick, modifier: Modifier) {
-    Surface(q.onClick, modifier, shape = CardShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(40.dp).background(q.accent.copy(alpha = .16f), CircleShape), Alignment.Center) {
-                Icon(q.icon, null, Modifier.size(22.dp), tint = q.accent)
-            }
-            Column(Modifier.padding(start = 12.dp)) {
-                Text(q.label, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(q.count, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-}
 
 @Composable
 private fun CollectionCard(label: String, cover: Media?, count: Int, onClick: () -> Unit) {
     Box(Modifier.size(width = 132.dp, height = 96.dp).clip(CardShape).clickable(onClick = onClick)) {
-        AsyncImage(cover?.uri, label, Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
+        AsyncImage(cover?.let { ThumbReq(it.uri, 320, it.isVideo) }, label, Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(.7f)))))
         Column(Modifier.align(Alignment.BottomStart).padding(10.dp)) {
             Text(label, color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1)
@@ -196,7 +163,7 @@ private fun AlbumItem(vm: GalleryViewModel, a: Album, ask: Ask, open: (AlbumDlg)
         val click = Modifier.clip(CardShape).combinedClickable(onClick = go, onLongClick = { menu = true })
         if (vm.albumList) Row(click.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
             AsyncImage(
-                a.cover.uri, a.name, Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                ThumbReq(a.cover.uri, 160, a.cover.isVideo), a.name, Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
                 contentScale = ContentScale.Crop, alpha = if (hidden) .5f else 1f,
             )
             Column(Modifier.weight(1f).padding(start = 14.dp)) {
@@ -211,7 +178,7 @@ private fun AlbumItem(vm: GalleryViewModel, a: Album, ask: Ask, open: (AlbumDlg)
         } else Column(click) {
             Box {
                 AsyncImage(
-                    a.cover.uri, a.name,
+                    ThumbReq(a.cover.uri, 320, a.cover.isVideo), a.name,
                     Modifier.fillMaxWidth().aspectRatio(1f).clip(CardShape).background(MaterialTheme.colorScheme.surfaceVariant),
                     contentScale = ContentScale.Crop, alpha = if (hidden) .5f else 1f,
                 )
@@ -222,12 +189,12 @@ private fun AlbumItem(vm: GalleryViewModel, a: Album, ask: Ask, open: (AlbumDlg)
                 )
             }
             Text(
-                a.name, Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp), style = MaterialTheme.typography.titleSmall,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                a.name, Modifier.fillMaxWidth().padding(top = 8.dp, start = 2.dp, end = 2.dp), style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
             )
             Text(
-                "${a.count}", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                "${a.count}", Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
             )
         }
         AppMenu(menu, { menu = false }) {
@@ -301,7 +268,7 @@ private fun CoverPicker(vm: GalleryViewModel, a: Album, onDismiss: () -> Unit) {
                             .then(if (current) Modifier.border(3.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp)) else Modifier)
                             .clickable { vm.setAlbumCover(a.id, m.id); onDismiss() },
                     ) {
-                        AsyncImage(m.uri, m.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        AsyncImage(ThumbReq(m.uri, 256, m.isVideo), m.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                         if (current) Icon(
                             Icons.Filled.CheckCircle, null, Modifier.align(Alignment.TopEnd).padding(4.dp),
                             tint = MaterialTheme.colorScheme.primary,
@@ -313,4 +280,19 @@ private fun CoverPicker(vm: GalleryViewModel, a: Album, onDismiss: () -> Unit) {
         confirmButton = { TextButton(onDismiss) { Text("Cancel") } },
         dismissButton = { if (a.id in vm.albumCovers) TextButton({ vm.setAlbumCover(a.id, null); onDismiss() }) { Text("Use newest") } },
     )
+}
+
+
+/** One row of the "More" card: icon, label, count, chevron; divider under all but the last. */
+@Composable
+private fun MoreRow(icon: ImageVector, label: String, count: String?, last: Boolean = false, onClick: () -> Unit) {
+    Column(Modifier.clickable(onClick = onClick)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurface)
+            Text(label, Modifier.weight(1f).padding(start = 16.dp), style = MaterialTheme.typography.bodyLarge)
+            if (count != null) Text(count, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.padding(start = 4.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (!last) HorizontalDivider(Modifier.padding(start = 58.dp, end = 18.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
+    }
 }

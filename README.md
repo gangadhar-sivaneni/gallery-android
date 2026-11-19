@@ -9,7 +9,6 @@
 [![Download APK](https://img.shields.io/badge/Download-Gallery.apk-4387F6?style=for-the-badge&logo=android&logoColor=white)](https://github.com/gangadhar-sivaneni/gallery-android/releases/latest/download/Gallery.apk)
 
 [![Release](https://img.shields.io/github/v/release/gangadhar-sivaneni/gallery-android?color=4387F6)](https://github.com/gangadhar-sivaneni/gallery-android/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/gangadhar-sivaneni/gallery-android/total?color=4387F6)](https://github.com/gangadhar-sivaneni/gallery-android/releases)
 [![Build](https://github.com/gangadhar-sivaneni/gallery-android/actions/workflows/build.yml/badge.svg)](https://github.com/gangadhar-sivaneni/gallery-android/actions/workflows/build.yml)
 ![Android 11+](https://img.shields.io/badge/Android-11%2B-3DDC84?logo=android&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7F52FF?logo=kotlin&logoColor=white)

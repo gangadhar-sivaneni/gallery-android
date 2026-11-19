@@ -49,6 +49,7 @@ data class Media(
     val path: String, // relative path, e.g. "DCIM/Camera/"
     val duration: Long,
     val favorite: Boolean,
+    val expires: Long = 0, // ms; set on trashed items: Android deletes them for good at this time
 ) {
     val isVideo get() = mime.startsWith("video")
     val isGif get() = mime == "image/gif"
@@ -167,8 +168,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     var sortBy by mutableStateOf(enumPref("sort2", SortBy.TAKEN)); private set
     var ascending by mutableStateOf(prefs.getBoolean("asc", false)); private set
     var groupBy by mutableStateOf(enumPref("group", GroupBy.DAY)); private set
-    var columns by mutableStateOf(prefs.getInt("cols", 4)); private set
-    var albumColumns by mutableStateOf(prefs.getInt("acols", 2)); private set
+    var columns by mutableStateOf(prefs.getInt("cols", 3)); private set
+    var albumColumns by mutableStateOf(prefs.getInt("acols", 3)); private set
     var albumList by mutableStateOf(prefs.getBoolean("alist", false)); private set
     var albumSort by mutableStateOf(enumPref("asort", AlbumSort.RECENT)); private set
     var kinds by mutableStateOf(prefs.getStringSet("kinds", null)?.map { Kind.valueOf(it) }?.toSet() ?: Kind.entries.toSet()); private set
@@ -200,7 +201,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     val backgroundFile: File get() = File(getApplication<Application>().filesDir, "app_background.jpg")
     var startTab by mutableStateOf(enumPref("startTab2", StartTab.ALL)); private set
     var dateMode by mutableStateOf(enumPref("dateMode", DateMode.SMART)); private set
-    var roundedThumbs by mutableStateOf(prefs.getBoolean("rounded", true)); private set
+    /** Corner radius of grid tiles in dp; 0 = square. */
+    var thumbCorner by mutableStateOf(prefs.getInt("corner", 8)); private set
+    val roundedThumbs get() = thumbCorner > 0
     var showCollections by mutableStateOf(prefs.getBoolean("collections", true)); private set
     var includeAppHidden by mutableStateOf(prefs.getBoolean("appHidden", false)); private set
     var autoplay by mutableStateOf(prefs.getBoolean("autoplay", true)); private set
@@ -212,6 +215,15 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     var appLock by mutableStateOf(prefs.getBoolean("appLock", false)); private set
     var useBiometric by mutableStateOf(prefs.getBoolean("bio", true)); private set
     var secureScreen by mutableStateOf(prefs.getBoolean("secure", false)); private set
+    /** Days an item stays in trash. Android itself deletes trash after 30 days; shorter is enforced by the app. */
+    var trashDays by mutableStateOf(prefs.getInt("trashDays", 30)); private set
+    fun changeTrashDays(d: Int) { trashDays = d; prefs.edit().putInt("trashDays", d).apply() }
+    /** Ask once per app run, so declining the delete dialog doesn't bring it straight back. */
+    var trashSweepAsked = false
+    /** Trashed items older than [trashDays]; trashed time = Android's expiry minus its 30 days. */
+    fun expiredTrash(now: Long = System.currentTimeMillis()): List<Media> =
+        if (trashDays >= 30) emptyList()
+        else trash.filter { it.expires > 0 && it.expires - now <= (30L - trashDays) * 86_400_000 }
 
     // --- lock state (not persisted: locks again whenever the app leaves the screen) ---
     var vaultUnlocked by mutableStateOf(false)
@@ -294,7 +306,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         val proj = arrayOf(
             C._ID, C.DISPLAY_NAME, C.DATE_TAKEN, C.DATE_MODIFIED, C.SIZE, C.WIDTH, C.HEIGHT,
             C.MIME_TYPE, C.BUCKET_ID, C.BUCKET_DISPLAY_NAME, C.RELATIVE_PATH, C.DURATION, C.IS_FAVORITE, C.DATE_ADDED,
-            MediaStore.Files.FileColumns.MEDIA_TYPE,
+            MediaStore.Files.FileColumns.MEDIA_TYPE, C.DATE_EXPIRES,
         )
         val mode = dateMode
         val out = ArrayList<Media>()
@@ -333,6 +345,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
                     path = path,
                     duration = c.getLong(11),
                     favorite = c.getInt(12) == 1,
+                    expires = c.getLong(15) * 1000,
                 )
             }
         }
@@ -449,7 +462,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun changeStartTab(t: StartTab) { startTab = t; prefs.edit().putString("startTab2", t.name).apply() }
     fun changeDateMode(d: DateMode) { dateMode = d; prefs.edit().putString("dateMode", d.name).apply(); reload() }
-    fun changeRounded(v: Boolean) { roundedThumbs = v; prefs.edit().putBoolean("rounded", v).apply() }
+    fun changeCorner(dp: Int) { thumbCorner = dp.coerceIn(0, 20); prefs.edit().putInt("corner", thumbCorner).apply() }
     fun changeCollections(v: Boolean) { showCollections = v; prefs.edit().putBoolean("collections", v).apply() }
     fun changeIncludeAppHidden(v: Boolean) { includeAppHidden = v; prefs.edit().putBoolean("appHidden", v).apply(); reload() }
     fun changeAutoplay(v: Boolean) { autoplay = v; prefs.edit().putBoolean("autoplay", v).apply() }
@@ -608,6 +621,18 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
         saveIndex(idx); loadVault()
         failed
+    }
+
+    /** Copies a file opened from another app (e.g. a WhatsApp document) into Pictures/Gallery or Movies/Gallery. */
+    fun saveToGallery(m: Media) = io("saved") {
+        val mime = m.mime.takeUnless { it.endsWith("*") }
+            ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(m.name.substringAfterLast('.', "").lowercase())
+            ?: if (m.isVideo) "video/mp4" else "image/jpeg"
+        insert(mime, m.name, if (mime.startsWith("video")) "Movies/Gallery/" else "Pictures/Gallery/") { out ->
+            resolver.openInputStream(m.uri)!!.use { it.copyTo(out) }
+        }
+        withContext(Dispatchers.Main) { toast("Saved to ${if (mime.startsWith("video")) "Movies" else "Pictures"}/Gallery") }
+        0
     }
 
     fun deleteFromVault(items: List<Media>) = io("deleted") {

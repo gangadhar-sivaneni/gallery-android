@@ -71,6 +71,15 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.ui.PlayerView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.automirrored.outlined.Undo
+import androidx.compose.material.icons.automirrored.outlined.Redo
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.graphics.SolidColor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -78,11 +87,16 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 private enum class VTool(val label: String, val icon: ImageVector) {
-    TRIM("Trim", Icons.Outlined.ContentCut), CUT("Cut", Icons.Outlined.CallSplit), CANVAS("Canvas", Icons.Outlined.AspectRatio),
-    CROP("Crop", Icons.Outlined.Crop), SPEED("Speed", Icons.Outlined.Speed), FILTERS("Filters", Icons.Outlined.AutoAwesome),
-    ADJUST("Adjust", Icons.Outlined.Tune), VOLUME("Volume", Icons.Outlined.VolumeUp), ROTATE("Rotate", Icons.AutoMirrored.Outlined.RotateRight),
-    FRAME("Snapshot", Icons.Outlined.PhotoCamera),
+    TRIM("Trim", Icons.Outlined.ContentCut), CUT("Split", Icons.Outlined.CallSplit), MUSIC("Music", Icons.Outlined.MusicNote),
+    TEXT("Text", Icons.Outlined.TextFields), ADJUST("Adjust", Icons.Outlined.Tune), FILTERS("Filter", Icons.Outlined.FilterVintage),
+    SPEED("Speed", Icons.Outlined.Speed), CROP("Crop", Icons.Outlined.Crop), CANVAS("Canvas", Icons.Outlined.AspectRatio),
+    VOLUME("Volume", Icons.Outlined.VolumeUp), ROTATE("Rotate", Icons.AutoMirrored.Outlined.RotateRight),
+    FRAME("Frame", Icons.Outlined.PhotoCamera),
 }
+
+/** Editor accent: the colour picked in Settings → Theme. */
+private val VAccent: Color @Composable get() = MaterialTheme.colorScheme.primary
+private val TEXT_COLORS = listOf(0xFFFFFFFF, 0xFF111111, 0xFFFFCC00, 0xFFFF3B30, 0xFF34C759, 0xFF0A84FF).map { it.toInt() }
 
 /** Output shapes. null ratio = keep the video's own shape. */
 internal enum class VCanvas(val label: String, val ratio: Float?) {
@@ -102,6 +116,10 @@ internal data class VEdit(
     val brightness: Float = 0f, val contrast: Float = 0f, val saturation: Float = 0f,
     val volume: Float = 1f, val mute: Boolean = false,
     val turns: Int = 0, val flip: Boolean = false,
+    // text laid over the whole video; [textPos] 0 = top .. 1 = bottom, [textSize] a fraction of the frame height
+    val text: String = "", val textColor: Int = 0xFFFFFFFF.toInt(), val textPos: Float = 0.85f, val textSize: Float = 0.06f,
+    // background music from the phone, looped under the video
+    val music: android.net.Uri? = null, val musicName: String = "", val musicVolume: Float = 1f, val originalSound: Boolean = true,
 )
 
 /** Parts between split points, as (start, end) fractions. */
@@ -141,7 +159,7 @@ private class LiveColor : RgbMatrix {
 
 /** Video-frame effects in the order they apply: crop → rotate/flip → colour → canvas. [aspect] = video's own w/h. */
 @UnstableApi
-private fun videoEffects(e: VEdit, aspect: Float, color: LiveColor? = null, previewH: Int = 0, sigma: Float = 12f): List<Effect> = buildList {
+private fun videoEffects(e: VEdit, aspect: Float, color: LiveColor? = null, previewH: Int = 0, sigma: Float = 12f, frameH: Int = 0): List<Effect> = buildList {
     // preview only: shrink frames first so every later effect works on far fewer pixels
     if (previewH > 0) add(Presentation.createForHeight(previewH))
     val c = e.crop
@@ -168,7 +186,29 @@ private fun videoEffects(e: VEdit, aspect: Float, color: LiveColor? = null, prev
             else add(GaussianBlurWithFrameOverlaid(sigma, a0 / target, 1f))
         } else add(Presentation.createForAspectRatio(target, Presentation.LAYOUT_SCALE_TO_FIT))
     }
+    if (e.text.isNotBlank() && frameH > 0) add(textOverlay(e, frameH))
 }
+
+@UnstableApi
+private fun textOverlay(e: VEdit, frameH: Int): Effect {
+    val span = android.text.SpannableString(e.text)
+    val all = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+    span.setSpan(android.text.style.ForegroundColorSpan(e.textColor), 0, e.text.length, all)
+    span.setSpan(android.text.style.AbsoluteSizeSpan((e.textSize * frameH).toInt().coerceAtLeast(12)), 0, e.text.length, all)
+    span.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, e.text.length, all)
+    // anchor: -1 bottom .. 1 top of the frame
+    val y = (1f - e.textPos * 2f).coerceIn(-0.85f, 0.85f)
+    return androidx.media3.effect.OverlayEffect(
+        listOf(androidx.media3.effect.TextOverlay.createStaticTextOverlay(span, androidx.media3.effect.StaticOverlaySettings.Builder().setBackgroundFrameAnchor(0f, y).build())),
+    )
+}
+
+/** Volume for the music track. */
+@UnstableApi
+private fun musicFx(volume: Float): List<AudioProcessor> = if (volume == 1f) emptyList() else listOf(ChannelMixingAudioProcessor().apply {
+    putChannelMixingMatrix(ChannelMixingMatrix.createForConstantGain(1, 1).scaleBy(volume))
+    putChannelMixingMatrix(ChannelMixingMatrix.createForConstantGain(2, 2).scaleBy(volume))
+})
 
 @UnstableApi
 private fun speedFx(e: VEdit): List<Effect> = if (e.speed != 1f) listOf(SpeedChangeEffect(e.speed)) else emptyList()
@@ -211,6 +251,29 @@ fun VideoEditor(vm: GalleryViewModel, m: Media, onBack: () -> Unit) {
     var cropRect by remember { mutableStateOf(Rect.Zero) }
     var cropRatio by remember { mutableStateOf<Float?>(null) }
     val changed = e != VEdit()
+    var res by remember { mutableIntStateOf(0) } // 0 = original quality, else the short side in pixels
+    var resMenu by remember { mutableStateOf(false) }
+    var vidShort by remember { mutableIntStateOf(0) }
+    var vidH by remember { mutableIntStateOf(0) } // shown height, after the video's own rotation
+    // undo / redo: quick runs of changes (a slider drag) count as one step
+    val undo = remember { mutableStateListOf<VEdit>() }
+    val redo = remember { mutableStateListOf<VEdit>() }
+    val lastPush = remember { longArrayOf(0L) }
+    fun set(n: VEdit) {
+        if (n == e) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastPush[0] > 600) { undo.add(e); redo.clear() }
+        lastPush[0] = now
+        e = n
+    }
+    val pickMusic = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u ->
+        if (u != null) {
+            val name = runCatching {
+                ctx.contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            }.getOrNull() ?: "Music"
+            set(e.copy(music = u, musicName = name.substringBeforeLast('.')))
+        }
+    }
 
     // video shape + timeline thumbnails, once
     LaunchedEffect(m.uri) {
@@ -224,6 +287,7 @@ fun VideoEditor(vm: GalleryViewModel, m: Media, onBack: () -> Unit) {
                     val d = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: duration
                     withContext(Dispatchers.Main) {
                         aspect = if (rot % 180 == 0) w / h else h / w; duration = d.coerceAtLeast(1)
+                        vidShort = minOf(w, h).toInt(); vidH = (if (rot % 180 == 0) h else w).toInt()
                         // preview renders at most 720p (short side); blur shrinks with it so it looks like the export
                         val short = minOf(w, h)
                         previewScale = if (short > 720f) 720f / short else 1f
@@ -247,15 +311,18 @@ fun VideoEditor(vm: GalleryViewModel, m: Media, onBack: () -> Unit) {
     fun posMs() = (player.currentPosition * speedNow).toLong()
     fun seekMs(ms: Long) = player.seekTo((ms / speedNow).toLong())
     // only shape/speed changes rebuild the player; colour and volume are applied live below (rebuilding is what lagged)
-    val previewKey = VEdit(crop = e.crop, canvas = e.canvas, blurBg = e.blurBg, speed = e.speed, turns = e.turns, flip = e.flip)
+    val previewKey = VEdit(
+        crop = e.crop, canvas = e.canvas, blurBg = e.blurBg, speed = e.speed, turns = e.turns, flip = e.flip,
+        text = e.text, textColor = e.textColor, textPos = e.textPos, textSize = e.textSize,
+    )
     var first by remember { mutableStateOf(true) }
-    LaunchedEffect(previewKey, aspect, duration, previewH) {
+    LaunchedEffect(previewKey, aspect, duration, previewH, vidH) {
         if (!first) delay(250) // let a tap settle before rebuilding
         val wasPlaying = player.isPlaying
         val pos = if (first) 0L else posMs()
         runCatching {
             val item = EditedMediaItem.Builder(MediaItem.fromUri(m.uri)).setDurationUs(duration * 1000)
-                .setEffects(Effects(audioFx(previewKey), videoEffects(previewKey, aspect, liveColor, previewH, 12f * previewScale) + speedFx(previewKey))).build()
+                .setEffects(Effects(audioFx(previewKey), videoEffects(previewKey, aspect, liveColor, previewH, 12f * previewScale, if (previewH > 0) previewH else vidH) + speedFx(previewKey))).build()
             player.setComposition(Composition.Builder(EditedMediaItemSequence.Builder(listOf(item)).build()).build(), (pos / previewKey.speed).toLong())
             speedNow = previewKey.speed
             player.prepare()
@@ -263,7 +330,7 @@ fun VideoEditor(vm: GalleryViewModel, m: Media, onBack: () -> Unit) {
             first = false
         }.onFailure { android.util.Log.w("Gallery", "preview failed", it) }
     }
-    LaunchedEffect(e.mute, e.volume) { player.volume = if (e.mute) 0f else e.volume.coerceAtMost(1f) }
+    LaunchedEffect(e.mute, e.volume, e.originalSound) { player.volume = if (e.mute || !e.originalSound) 0f else e.volume.coerceAtMost(1f) }
     LaunchedEffect(e.filter, e.brightness, e.contrast, e.saturation) {
         liveColor.set(e)
         // paused: redraw the current frame so the change shows; playing frames pick it up by themselves
@@ -273,6 +340,18 @@ fun VideoEditor(vm: GalleryViewModel, m: Media, onBack: () -> Unit) {
     val partRemoved by remember { derivedStateOf { e.partAt(position.toFloat() / duration).first in e.removed } }
     val startMs = (e.start * duration).toLong()
     val endMs = (e.end * duration).toLong()
+    // music preview: a second player that follows play/pause
+    val music = remember { ExoPlayer.Builder(ctx).build().apply { repeatMode = Player.REPEAT_MODE_ONE } }
+    DisposableEffect(music) { onDispose { music.release() } }
+    LaunchedEffect(e.music) {
+        val u = e.music
+        if (u == null) music.clearMediaItems() else { music.setMediaItem(MediaItem.fromUri(u)); music.prepare() }
+    }
+    LaunchedEffect(e.musicVolume) { music.volume = e.musicVolume.coerceIn(0f, 1f) }
+    LaunchedEffect(playing, e.music) {
+        if (e.music == null) return@LaunchedEffect
+        if (playing) { music.seekTo((posMs() - startMs).coerceAtLeast(0L)); music.play() } else music.pause()
+    }
     // keep playback inside the trim and skip the cut part; polls only while this screen is open
     LaunchedEffect(player) {
         player.addListener(object : Player.Listener {
@@ -293,16 +372,22 @@ fun VideoEditor(vm: GalleryViewModel, m: Media, onBack: () -> Unit) {
         player.pause()
         progress = 0
         val out = File(ctx.cacheDir, "edit_${System.currentTimeMillis()}.mp4")
-        val fx = videoEffects(e, aspect) + speedFx(e)
+        val fx = videoEffects(e, aspect, frameH = vidH) + speedFx(e) + (if (res > 0) listOf(Presentation.createForShortSide(res)) else emptyList())
         fun clip(fromMs: Long, toMs: Long) = EditedMediaItem.Builder(
             MediaItem.Builder().setUri(m.uri).setClippingConfiguration(
                 MediaItem.ClippingConfiguration.Builder().setStartPositionMs(fromMs).setEndPositionMs(toMs).build(),
             ).build(),
-        ).setRemoveAudio(e.mute).setEffects(Effects(audioFx(e), fx)).build()
+        ).setRemoveAudio(e.mute || !e.originalSound).setEffects(Effects(audioFx(e), fx)).build()
         val clips = e.kept().map { (a, b) -> (a * duration).toLong() to (b * duration).toLong() }
             .filter { (a, b) -> b - a > 200 }.map { (a, b) -> clip(a, b) }
         if (clips.isEmpty()) { progress = null; vm.toast("Nothing left after the cut"); return }
-        val composition = Composition.Builder(EditedMediaItemSequence.Builder(clips).build()).build()
+        val sequences = mutableListOf(EditedMediaItemSequence.Builder(clips).build())
+        e.music?.let { u ->
+            sequences += EditedMediaItemSequence.Builder(
+                listOf(EditedMediaItem.Builder(MediaItem.fromUri(u)).setRemoveVideo(true).setEffects(Effects(musicFx(e.musicVolume), emptyList())).build()),
+            ).setIsLooping(true).build()
+        }
+        val composition = Composition.Builder(sequences).build()
         val transformer = Transformer.Builder(ctx).addListener(object : Transformer.Listener {
             override fun onCompleted(composition: Composition, result: ExportResult) {
                 scope.launch {
@@ -356,108 +441,112 @@ fun VideoEditor(vm: GalleryViewModel, m: Media, onBack: () -> Unit) {
     fun commitCrop() {
         val b = cropFrame ?: return
         if (cropRect.width <= 0f) return
-        e = e.copy(crop = android.graphics.RectF(cropRect.left / b.width, cropRect.top / b.height, cropRect.right / b.width, cropRect.bottom / b.height))
+        set(e.copy(crop = android.graphics.RectF(cropRect.left / b.width, cropRect.top / b.height, cropRect.right / b.width, cropRect.bottom / b.height)))
     }
 
     BackHandler(progress == null) { if (changed) confirmExit = true else onBack() }
+    val resOptions = remember(vidShort) { listOf(0) + listOf(1080, 720, 480).filter { vidShort == 0 || it < vidShort } }
 
-    Scaffold(
-        containerColor = Color.Black,
-        topBar = {
-            TopAppBar(
-                navigationIcon = { IconButton({ if (changed) confirmExit = true else onBack() }, enabled = progress == null) { Icon(Icons.Default.Close, "Close") } },
-                title = {
-                    Column {
-                        Text("Edit video")
-                        Text(
-                            "${duration(position)} / ${duration(duration)}",
-                            style = MaterialTheme.typography.labelMedium, color = Color.White.copy(.7f),
-                        )
-                    }
-                },
-                actions = {
-                    if (changed) TextButton({ e = VEdit(); cropRect = Rect.Zero }, colors = ButtonDefaults.textButtonColors(contentColor = Color.White)) { Text("Reset") }
-                    Button({ if (tool == VTool.CROP) commitCrop(); export() }, enabled = changed && progress == null, modifier = Modifier.padding(end = 8.dp)) {
-                        Icon(Icons.Outlined.FileUpload, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Export")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Black, titleContentColor = Color.White, navigationIconContentColor = Color.White,
-                ),
-            )
-        },
-        bottomBar = {
-            Column(Modifier.background(Color(0xFF111214)).navigationBarsPadding()) {
-                // panel for the selected tool
-                Box(Modifier.fillMaxWidth().heightIn(min = 96.dp).padding(horizontal = 16.dp, vertical = 10.dp), Alignment.Center) {
-                    ToolPanel(
-                        tool, e, onChange = { e = it }, adj = adj, onAdj = { adj = it },
-                        at = { position.toFloat() / duration }, partRemoved = partRemoved,
-                        thumb = thumbs.firstOrNull(), cropRatio = cropRatio,
-                        onCropRatio = { r ->
-                            cropRatio = r
-                            val b = cropFrame ?: return@ToolPanel
-                            val want = r ?: return@ToolPanel
-                            var w = b.width.toFloat(); var h = w / want
-                            if (h > b.height) { h = b.height.toFloat(); w = h * want }
-                            cropRect = Rect(Offset((b.width - w) / 2, (b.height - h) / 2), Size(w, h))
-                            commitCrop()
-                        },
-                        onSnapshot = {
-                            grabFrame(true) { f ->
-                                if (f == null) vm.toast("Couldn't grab this frame")
-                                else scope.launch { vm.toast(if (vm.saveFrame(m, f, posMs())) "Frame saved as a photo" else "Couldn't save this frame") }
-                            }
-                        },
-                    )
+    Column(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
+        // top: Cancel · quality · Save, like the phone's own video editor
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            VPill("Cancel", Color(0xFF2C2C2E), Color.White, enabled = progress == null) { if (changed) confirmExit = true else onBack() }
+            Box(Modifier.weight(1f), Alignment.Center) {
+                TextButton({ resMenu = true }) {
+                    Text(if (res == 0) "Original" else "${res}p", color = Color.White.copy(.8f), style = MaterialTheme.typography.titleMedium)
+                    Icon(Icons.Outlined.ArrowDropDown, "Choose quality", tint = Color.White.copy(.8f))
                 }
-                HorizontalDivider(color = Color.White.copy(.08f))
-                LazyRow(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)) {
-                    items(VTool.entries) { t ->
-                        val sel = t == tool
-                        Column(
-                            Modifier.width(72.dp).clip(RoundedCornerShape(12.dp))
-                                .clickable { if (tool == VTool.CROP) commitCrop(); tool = t }
-                                .background(if (sel) Color.White.copy(.08f) else Color.Transparent).padding(vertical = 8.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Icon(t.icon, t.label, tint = if (sel) MaterialTheme.colorScheme.primary else Color.White)
-                            Spacer(Modifier.height(4.dp))
-                            Text(t.label, color = if (sel) MaterialTheme.colorScheme.primary else Color.White.copy(.85f), fontSize = 11.sp, maxLines = 1)
+                AppMenu(resMenu, { resMenu = false }) {
+                    resOptions.forEach { r ->
+                        ChoiceItem(if (r == 0) "Original quality" else "${r}p", res == r) { res = r; resMenu = false }
+                    }
+                }
+            }
+            VPill("Save", if (changed) VAccent else VAccent.copy(alpha = .35f), MaterialTheme.colorScheme.onPrimary, enabled = changed && progress == null) {
+                if (tool == VTool.CROP) commitCrop(); export()
+            }
+        }
+        // preview
+        Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp), Alignment.Center) {
+            val frame = cropFrame
+            if (tool == VTool.CROP && frame != null) {
+                CropView(remember(frame) { frame.asImageBitmap() }, cropRect, cropRatio, interactive = true, filter = ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix())) {
+                    cropRect = it
+                }
+            } else {
+                AndroidView(
+                    factory = { PlayerView(it).apply { this.player = player; useController = false } },
+                    modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+                        detectTapGestures { if (player.isPlaying) player.pause() else { if (posMs() >= endMs) seekMs(startMs); player.play() } }
+                    },
+                )
+                if (!playing) Icon(
+                    Icons.Default.PlayArrow, "Play",
+                    Modifier.size(64.dp).background(Color.Black.copy(.45f), RoundedCornerShape(50)).padding(12.dp), tint = Color.White,
+                )
+            }
+                }
+        // time · play · undo / redo
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${clock(position)} / ${clock(duration)}", Modifier.weight(1f), color = Color.White, style = MaterialTheme.typography.bodyMedium)
+            IconButton({ if (player.isPlaying) player.pause() else { if (posMs() >= endMs) seekMs(startMs); player.play() } }) {
+                Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", Modifier.size(34.dp), tint = Color.White)
+            }
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End) {
+                IconButton({ redo.add(e); e = undo.removeAt(undo.lastIndex) }, enabled = undo.isNotEmpty()) {
+                    Icon(Icons.AutoMirrored.Outlined.Undo, "Undo", tint = if (undo.isNotEmpty()) Color.White else Color.White.copy(.3f))
+                }
+                IconButton({ undo.add(e); e = redo.removeAt(redo.lastIndex) }, enabled = redo.isNotEmpty()) {
+                    Icon(Icons.AutoMirrored.Outlined.Redo, "Redo", tint = if (redo.isNotEmpty()) Color.White else Color.White.copy(.3f))
+                }
+            }
+        }
+        Column(Modifier.fillMaxWidth().background(Color(0xFF1C1C1E))) {
+            // panel for the selected tool
+            Box(Modifier.fillMaxWidth().height(160.dp).padding(horizontal = 16.dp, vertical = 8.dp), Alignment.Center) {
+                ToolPanel(
+                    tool, e, onChange = { set(it) }, adj = adj, onAdj = { adj = it },
+                    at = { position.toFloat() / duration }, partRemoved = partRemoved,
+                    thumb = thumbs.firstOrNull(), cropRatio = cropRatio,
+                    onCropRatio = { r ->
+                        cropRatio = r
+                        val b = cropFrame ?: return@ToolPanel
+                        val want = r ?: return@ToolPanel
+                        var w = b.width.toFloat(); var h = w / want
+                        if (h > b.height) { h = b.height.toFloat(); w = h * want }
+                        cropRect = Rect(Offset((b.width - w) / 2, (b.height - h) / 2), Size(w, h))
+                        commitCrop()
+                    },
+                    onSnapshot = {
+                        grabFrame(true) { f ->
+                            if (f == null) vm.toast("Couldn't grab this frame")
+                            else scope.launch { vm.toast(if (vm.saveFrame(m, f, posMs())) "Frame saved as a photo" else "Couldn't save this frame") }
                         }
-                    }
-                }
+                    },
+                    onPickMusic = { pickMusic.launch("audio/*") },
+                )
             }
-        },
-    ) { pad ->
-        Column(Modifier.padding(pad).fillMaxSize()) {
-            // preview
-            Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp), Alignment.Center) {
-                val frame = cropFrame
-                if (tool == VTool.CROP && frame != null) {
-                    CropView(remember(frame) { frame.asImageBitmap() }, cropRect, cropRatio, interactive = true, filter = ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix())) {
-                        cropRect = it
-                    }
-                } else {
-                    AndroidView(
-                        factory = { PlayerView(it).apply { this.player = player; useController = false } },
-                        modifier = Modifier.fillMaxSize().pointerInput(Unit) {
-                            detectTapGestures { if (player.isPlaying) player.pause() else { if (posMs() >= endMs) seekMs(startMs); player.play() } }
-                        },
-                    )
-                    if (!playing) Icon(
-                        Icons.Default.PlayArrow, "Play",
-                        Modifier.size(64.dp).background(Color.Black.copy(.45f), RoundedCornerShape(50)).padding(12.dp), tint = Color.White,
-                    )
-                }
-            }
-            // timeline
             Timeline(
                 thumbs, e, { position.toFloat() / duration },
-                onTrim = { s, en -> e = e.copy(start = s, end = en); seekMs(((if (s != e.start) s else en) * duration).toLong()) },
+                onTrim = { s, en -> set(e.copy(start = s, end = en)); seekMs(((if (s != e.start) s else en) * duration).toLong()) },
                 onSeek = { f -> seekMs((f * duration).toLong()) },
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             )
+            // tool tabs, the chosen one in yellow
+            LazyRow(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)) {
+                items(VTool.entries) { t ->
+                    val sel = t == tool
+                    Column(
+                        Modifier.width(68.dp).clip(RoundedCornerShape(12.dp))
+                            .clickable { if (tool == VTool.CROP) commitCrop(); tool = t }.padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Icon(t.icon, null, Modifier.size(26.dp), tint = if (sel) VAccent else Color.White.copy(.85f))
+                        Spacer(Modifier.height(4.dp))
+                        Text(t.label, color = if (sel) VAccent else Color.White.copy(.85f), fontSize = 12.sp, maxLines = 1)
+                    }
+                }
+            }
         }
     }
 
@@ -490,7 +579,7 @@ private fun Timeline(
     onTrim: (Float, Float) -> Unit, onSeek: (Float) -> Unit, modifier: Modifier,
 ) {
     val grab = with(LocalDensity.current) { 24.dp.toPx() }
-    val primary = MaterialTheme.colorScheme.primary
+    val primary = VAccent // playhead in the accent colour
     val cur by rememberUpdatedState(e)
     Box(modifier.fillMaxWidth().height(64.dp)) {
         Row(Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)).background(Color(0xFF23252A))) {
@@ -548,26 +637,69 @@ private fun Timeline(
 @Composable
 private fun ToolPanel(
     tool: VTool, e: VEdit, onChange: (VEdit) -> Unit, adj: Int, onAdj: (Int) -> Unit, thumb: ImageBitmap?,
-    cropRatio: Float?, onCropRatio: (Float?) -> Unit, onSnapshot: () -> Unit,
+    cropRatio: Float?, onCropRatio: (Float?) -> Unit, onSnapshot: () -> Unit, onPickMusic: () -> Unit,
     at: () -> Float, partRemoved: Boolean,
 ) {
     val white = Color.White
     @Composable fun hint(t: String) = Text(t, color = white.copy(.75f), style = MaterialTheme.typography.bodySmall)
-    @Composable fun chip(label: String, sel: Boolean, onClick: () -> Unit) = FilterChip(sel, onClick, { Text(label) })
+    @Composable fun chip(label: String, sel: Boolean, onClick: () -> Unit) = Box(
+        Modifier.clip(CircleShape).background(if (sel) VAccent else Color(0xFF2C2C2E)).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 7.dp),
+    ) { Text(label, color = if (sel) MaterialTheme.colorScheme.onPrimary else white, fontSize = 13.sp) }
     when (tool) {
         VTool.TRIM -> hint("Drag the white handles on the timeline to choose the part to keep")
+        VTool.MUSIC -> Column(
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalAlignment = if (e.music == null) Alignment.CenterHorizontally else Alignment.Start,
+        ) {
+            if (e.music == null) {
+                DarkAction(Icons.Outlined.LibraryMusic, "Add music from phone", onClick = onPickMusic)
+                hint("The song plays under the video and repeats if it's shorter")
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.MusicNote, null, tint = VAccent)
+                    Text(e.musicName, color = white, modifier = Modifier.weight(1f).padding(horizontal = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    TextButton(onPickMusic) { Text("Change", color = VAccent) }
+                    TextButton({ onChange(e.copy(music = null, musicName = "")) }) { Text("Remove", color = white) }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Music", color = white, modifier = Modifier.width(56.dp))
+                    AppSlider(e.musicVolume, { onChange(e.copy(musicVolume = it)) }, Modifier.weight(1f), label = "Music volume", color = VAccent, track = white.copy(.25f))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Original sound", color = white, modifier = Modifier.weight(1f))
+                    Switch(e.originalSound, { onChange(e.copy(originalSound = it)) })
+                }
+            }
+        }
+        VTool.TEXT -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            BasicTextField(
+                e.text, { onChange(e.copy(text = it)) },
+                Modifier.fillMaxWidth().clip(CircleShape).background(Color(0xFF2C2C2E)).padding(horizontal = 18.dp, vertical = 12.dp),
+                singleLine = true, textStyle = TextStyle(color = white, fontSize = 16.sp), cursorBrush = SolidColor(VAccent),
+                decorationBox = { inner -> Box { if (e.text.isEmpty()) Text("Type text for the video", color = white.copy(.45f), fontSize = 16.sp); inner() } },
+            )
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(TEXT_COLORS) { c ->
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).background(Color(c))
+                            .border(if (c == e.textColor) 3.dp else 1.dp, if (c == e.textColor) VAccent else white.copy(.4f), CircleShape)
+                            .clickable { onChange(e.copy(textColor = c)) },
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Top" to 0.12f, "Middle" to 0.5f, "Bottom" to 0.85f).forEach { (l, p) -> chip(l, e.textPos == p) { onChange(e.copy(textPos = p)) } }
+                Spacer(Modifier.width(8.dp))
+                listOf("S" to 0.04f, "M" to 0.06f, "L" to 0.09f).forEach { (l, z) -> chip(l, e.textSize == z) { onChange(e.copy(textSize = z)) } }
+            }
+        }
         VTool.CUT -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledTonalButton({ onChange(e.split(at())) }) {
-                    Icon(Icons.Outlined.ContentCut, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Split here")
-                }
-                OutlinedButton(
-                    { onChange(e.togglePart(at())) }, enabled = e.splits.isNotEmpty(),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = white),
-                ) {
-                    Icon(if (partRemoved) Icons.Outlined.RestoreFromTrash else Icons.Outlined.Delete, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp)); Text(if (partRemoved) "Restore part" else "Delete part")
-                }
+                DarkAction(Icons.Outlined.ContentCut, "Split here") { onChange(e.split(at())) }
+                DarkAction(
+                    if (partRemoved) Icons.Outlined.RestoreFromTrash else Icons.Outlined.Delete,
+                    if (partRemoved) "Restore part" else "Delete part", enabled = e.splits.isNotEmpty(),
+                ) { onChange(e.togglePart(at())) }
             }
             hint(if (e.splits.isEmpty()) "Move the timeline to where you want to cut, then tap Split here" else "Move into a part and delete it; red parts are left out")
         }
@@ -601,14 +733,14 @@ private fun ToolPanel(
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onChange(e.copy(filter = f)) }) {
                     Box(
                         Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF23252A))
-                            .then(if (sel) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp)) else Modifier),
+                            .then(if (sel) Modifier.border(2.dp, VAccent, RoundedCornerShape(10.dp)) else Modifier),
                     ) {
                         thumb?.let {
                             Image(it, f.label, Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
                                 colorFilter = ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix(colorMatrix(f, 0f, 0f, 0f, 0f))))
                         }
                     }
-                    Text(f.label, color = if (sel) MaterialTheme.colorScheme.primary else white, fontSize = 11.sp)
+                    Text(f.label, color = if (sel) VAccent else white, fontSize = 11.sp)
                 }
             }
         }
@@ -617,16 +749,16 @@ private fun ToolPanel(
             val v = when (adj) { 0 -> e.brightness; 1 -> e.contrast; else -> e.saturation }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { names.forEachIndexed { i, n -> chip(n, adj == i) { onAdj(i) } } }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Slider(v, { x ->
+                AppSlider(v, { x ->
                     onChange(when (adj) { 0 -> e.copy(brightness = x); 1 -> e.copy(contrast = x); else -> e.copy(saturation = x) })
-                }, Modifier.weight(1f), valueRange = -1f..1f)
+                }, Modifier.weight(1f), range = -1f..1f, label = names[adj], color = VAccent, track = white.copy(.25f))
                 Text("${(v * 100).toInt()}", color = white, modifier = Modifier.width(40.dp), fontWeight = FontWeight.SemiBold)
             }
         }
         VTool.VOLUME -> Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(if (e.mute) Icons.Outlined.VolumeOff else Icons.Outlined.VolumeUp, null, tint = white)
-                Slider(e.volume, { onChange(e.copy(volume = it, mute = false)) }, Modifier.weight(1f).padding(horizontal = 8.dp), valueRange = 0f..2f, enabled = !e.mute)
+                AppSlider(e.volume, { onChange(e.copy(volume = it, mute = false)) }, Modifier.weight(1f).padding(horizontal = 8.dp), range = 0f..2f, enabled = !e.mute, label = "Volume", color = VAccent, track = white.copy(.25f))
                 Text("${(e.volume * 100).toInt()}%", color = white, modifier = Modifier.width(48.dp))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -640,10 +772,16 @@ private fun ToolPanel(
             BarAction(Icons.Outlined.Flip, if (e.flip) "Flipped" else "Mirror", white) { onChange(e.copy(flip = !e.flip)) }
         }
         VTool.FRAME -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onSnapshot) { Icon(Icons.Outlined.PhotoCamera, null); Spacer(Modifier.width(8.dp)); Text("Save this frame as a photo") }
+            DarkAction(Icons.Outlined.PhotoCamera, "Save this frame as a photo", onClick = onSnapshot)
             hint("Pause on the moment you want, then tap")
         }
     }
 }
 
 private fun speedText(s: Float) = (if (s % 1f == 0f) "${s.toInt()}" else "$s".trimEnd('0')) + "x"
+
+@Composable
+private fun VPill(label: String, bg: Color, fg: Color, enabled: Boolean = true, onClick: () -> Unit) = Box(
+    Modifier.clip(CircleShape).background(if (enabled) bg else Color(0xFF2C2C2E)).clickable(enabled = enabled, onClick = onClick)
+        .padding(horizontal = 22.dp, vertical = 10.dp),
+) { Text(label, color = if (enabled) fg else Color.White.copy(alpha = .35f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }

@@ -22,11 +22,36 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.material.icons.automirrored.outlined.Sort
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.semantics.Role
+import kotlinx.coroutines.launch
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +64,10 @@ import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.outlined.PhotoAlbum
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.VideoLibrary
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.Screenshot
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -69,10 +98,12 @@ class MainActivity : FragmentActivity() {
         setContent {
             setSingletonImageLoaderFactory { ctx ->
                 ImageLoader.Builder(ctx).components {
+                    add(ThumbFetcher.Factory())
+                    add(ThumbKeyer())
                     add(VideoFrameDecoder.Factory())
                     add(AnimatedImageDecoder.Factory())
                     add(coil3.svg.SvgDecoder.Factory())
-                }.crossfade(120).build() // thumbnails fade in instead of popping
+                }.build() // no fade-in: thumbnails pop in like the phone's Photos app, and scrolling stays smooth
             }
             val dark = isDarkTheme(vm)
             val screen = vm.stack.last()
@@ -81,10 +112,11 @@ class MainActivity : FragmentActivity() {
             val private = vm.secureScreen || (screen as? Screen.Grid)?.source == Source.Vault ||
                 (screen as? Screen.Viewer)?.source == Source.Vault
             SideEffect {
-                // dark status-bar icons on light screens; the viewer is always black
+                // dark status-bar icons on light screens; the viewer and the editors are always black
+                val black = inViewer || screen is Screen.Editor || screen is Screen.VideoEditor || screen is Screen.WallpaperCrop
                 WindowCompat.getInsetsController(window, window.decorView).apply {
-                    isAppearanceLightStatusBars = !dark && !inViewer
-                    isAppearanceLightNavigationBars = !dark && !inViewer
+                    isAppearanceLightStatusBars = !dark && !black
+                    isAppearanceLightNavigationBars = !dark && !black
                 }
                 // hide private content from screenshots and the recent-apps preview
                 if (private) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -96,7 +128,7 @@ class MainActivity : FragmentActivity() {
                     }
                 }
             }
-            MaterialTheme(appColorScheme(vm)) {
+            MaterialTheme(appColorScheme(vm), typography = AppTypography) {
                 Box(Modifier.fillMaxSize()) {
                     AppBackdrop(vm)
                     Surface(color = MaterialTheme.colorScheme.background) { App(vm) }
@@ -226,6 +258,14 @@ fun App(vm: GalleryViewModel) {
         return
     }
 
+    // "Empty trash after" shorter than Android's 30 days: delete what's past it (no popup with Skip confirmations)
+    LaunchedEffect(vm.trash, vm.trashDays) {
+        val old = vm.expiredTrash()
+        if (old.isEmpty() || vm.trashSweepAsked || vm.openedFromOtherApp) return@LaunchedEffect
+        vm.trashSweepAsked = true
+        ask(vm.deleteRequest(old), null)
+    }
+
     // open an item from a home-screen shortcut or another app once media is loaded
     LaunchedEffect(vm.pendingOpen, vm.loading) {
         val id = vm.pendingOpen ?: return@LaunchedEffect
@@ -285,41 +325,125 @@ fun App(vm: GalleryViewModel) {
     }
 }
 
+/** Extra filters for the All tab, picked with the round button next to the tabs. */
+private data class HomeFilter(val label: String, val icon: ImageVector, val source: Source)
+private val HOME_FILTERS = listOf(
+    HomeFilter("Everything", Icons.Outlined.PhotoLibrary, Source.All),
+    HomeFilter("Videos", Icons.Outlined.VideoLibrary, Source.Videos),
+    HomeFilter("Screenshots & recordings", Icons.Outlined.Screenshot, Source.Collection(Smart.SCREENSHOTS)),
+    HomeFilter("Favourites", Icons.Outlined.FavoriteBorder, Source.Favorites),
+)
+private val PHOTO_FILTERS = listOf(
+    HomeFilter("All photos", Icons.Outlined.Image, Source.Images),
+    HomeFilter("Screenshots", Icons.Outlined.Screenshot, Source.Collection(Smart.SCREENSHOTS)),
+    HomeFilter("Favourites", Icons.Outlined.FavoriteBorder, Source.Favorites),
+)
+private val TABS = listOf("All", "Photos", "Albums")
+
 @Composable
 fun Home(vm: GalleryViewModel, ask: Ask) {
-    var tab by rememberSaveable { mutableIntStateOf(vm.startTab.ordinal) }
-    // order matches StartTab
-    val tabs = listOf(
-        Triple("All", Icons.Filled.PhotoLibrary, Icons.Outlined.PhotoLibrary),
-        Triple("Photos", Icons.Filled.Image, Icons.Outlined.Image),
-        Triple("Videos", Icons.Filled.VideoLibrary, Icons.Outlined.VideoLibrary),
-        Triple("Albums", Icons.Filled.PhotoAlbum, Icons.Outlined.PhotoAlbum),
-    )
-    val content: @Composable () -> Unit = {
-        Crossfade(tab, animationSpec = tween(180), label = "tab") { t -> when (t) {
-            0 -> MediaGrid(vm, Source.All, ask, onBack = null)
-            1 -> MediaGrid(vm, Source.Images, ask, onBack = null)
-            2 -> MediaGrid(vm, Source.Videos, ask, onBack = null)
-            else -> Albums(vm, ask)
-        } }
-    }
-    // bottom tab bar in both orientations
-    Scaffold(
-        bottomBar = {
-            if (!vm.selectionActive) NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-                tabs.forEachIndexed { i, (label, on, off) ->
-                    NavigationBarItem(
-                        selected = tab == i, onClick = { tab = i },
-                        icon = { Icon(if (tab == i) on else off, null) }, label = { Text(label) },
-                    )
+    // "Start on" setting picks the first tab (and the Videos filter)
+    var tab by rememberSaveable { mutableIntStateOf(when (vm.startTab) { StartTab.PHOTOS -> 1; StartTab.ALBUMS -> 2; else -> 0 }) }
+    var filter by rememberSaveable { mutableIntStateOf(if (vm.startTab == StartTab.VIDEOS) 1 else 0) }
+    var photoFilter by rememberSaveable { mutableIntStateOf(0) }
+    var filterMenu by remember { mutableStateOf(false) }
+    val tabState = rememberSaveableStateHolder()
+    Box(Modifier.fillMaxSize()) {
+        CompositionLocalProvider(LocalBottomBarSpace provides if (vm.selectionActive) 0.dp else 84.dp) {
+            // instant switch (no two grids fading over each other); each tab keeps its scroll position
+            tabState.SaveableStateProvider("$tab:${if (tab == 0) filter else if (tab == 1) photoFilter else 0}") {
+                when (tab) {
+                    0 -> MediaGrid(vm, HOME_FILTERS[filter].source, ask, onBack = null)
+                    1 -> MediaGrid(vm, PHOTO_FILTERS[photoFilter].source, ask, onBack = null)
+                    else -> Albums(vm, ask)
                 }
             }
-        },
-    ) { pad ->
-        Box(Modifier.padding(bottom = pad.calculateBottomPadding()).consumeWindowInsets(PaddingValues(bottom = pad.calculateBottomPadding()))) {
-            content()
+        }
+        AnimatedVisibility(
+            !vm.selectionActive, Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            enter = slideInVertically { it } + fadeIn(), exit = slideOutVertically { it } + fadeOut(),
+        ) {
+            val fade = MaterialTheme.colorScheme.background
+            // tabs and filter sit side by side in one centred row, so they can't overlap on narrow phones
+            Row(
+                Modifier.fillMaxWidth()
+                    .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(fade.copy(alpha = 0f), fade.copy(alpha = .85f))))
+                    .navigationBarsPadding().padding(start = 16.dp, end = 16.dp, top = 28.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TabPill(TABS, tab) { tab = it }
+                // every tab has its round button (filters, or album sort), so the bar is the same on all three
+                Box {
+                    val active = (tab == 0 && filter != 0) || (tab == 1 && photoFilter != 0)
+                    Surface(
+                        { filterMenu = true }, Modifier.size(54.dp), shape = CircleShape, shadowElevation = 10.dp,
+                        color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Crossfade(tab == 2, label = "tabButton") { albums ->
+                                if (albums) Icon(Icons.AutoMirrored.Outlined.Sort, "Sort albums: ${vm.albumSort.label}")
+                                else Icon(Icons.Outlined.FilterList, "Filter: ${if (tab == 0) HOME_FILTERS[filter].label else PHOTO_FILTERS[photoFilter].label}")
+                            }
+                        }
+                    }
+                    AppMenu(filterMenu, { filterMenu = false }) {
+                        when (tab) {
+                            0 -> HOME_FILTERS.forEachIndexed { i, f -> ChoiceItem(f.label, i == filter) { filter = i; filterMenu = false } }
+                            1 -> PHOTO_FILTERS.forEachIndexed { i, f -> ChoiceItem(f.label, i == photoFilter) { photoFilter = i; filterMenu = false } }
+                            else -> AlbumSort.entries.forEach { s -> ChoiceItem(s.label, vm.albumSort == s) { vm.changeAlbumSort(s); filterMenu = false } }
+                        }
+                    }
+                }
+            }
         }
     }
 }
+
+/** All | Photos | Albums: a white pill slides under the chosen tab. */
+@Composable
+private fun TabPill(tabs: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+    val spots = remember { mutableStateMapOf<Int, Pair<Float, Float>>() } // each tab's left edge and width, px
+    val x = remember { androidx.compose.animation.core.Animatable(0f) }
+    val w = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(selected, spots[selected]) {
+        val (tx, tw) = spots[selected] ?: return@LaunchedEffect
+        if (w.value == 0f) { x.snapTo(tx); w.snapTo(tw) } // first show: no slide-in
+        else kotlinx.coroutines.coroutineScope {
+            launch { x.animateTo(tx, spring(dampingRatio = .82f, stiffness = 450f)) }
+            launch { w.animateTo(tw, spring(dampingRatio = .82f, stiffness = 450f)) }
+        }
+    }
+    val pill = MaterialTheme.colorScheme.surfaceContainer
+    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh, shadowElevation = 10.dp) {
+        Row(
+            Modifier.padding(5.dp)
+                // drawn, not laid out: the slide only repaints, nothing re-measures
+                .drawBehind {
+                    if (w.value > 0f) drawRoundRect(
+                        pill, androidx.compose.ui.geometry.Offset(x.value, 0f), androidx.compose.ui.geometry.Size(w.value, size.height),
+                        androidx.compose.ui.geometry.CornerRadius(size.height / 2),
+                    )
+                }
+                .selectableGroup(),
+        ) {
+            tabs.forEachIndexed { i, l ->
+                val sel = i == selected
+                Text(
+                    l,
+                    Modifier.onPlaced { spots[i] = it.positionInParent().x to it.size.width.toFloat() }
+                        .clip(CircleShape).selectable(sel, role = Role.Tab) { onSelect(i) }
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+}
+
+/** Space the floating tab bar covers at the bottom; scrolling screens add it so their last row isn't hidden. */
+val LocalBottomBarSpace = compositionLocalOf<Dp> { 0.dp }
 
 val CardShape = RoundedCornerShape(16.dp)

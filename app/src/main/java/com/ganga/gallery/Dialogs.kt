@@ -16,6 +16,15 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Smartphone
 import androidx.compose.material.icons.outlined.Wallpaper
+import androidx.compose.material.icons.outlined.InsertDriveFile
+import androidx.compose.material.icons.outlined.Camera
+import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.PhotoAlbum
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Screenshot
+import androidx.compose.material.icons.outlined.Videocam
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -55,7 +64,7 @@ fun MediaDialogs(vm: GalleryViewModel, dlg: Dlg?, ask: Ask, onDone: () -> Unit, 
             onDone()
             ask(vm.writeRequest(listOf(dlg.m))) { vm.rename(dlg.m, name) }
         }
-        is Dlg.Info -> InfoDialog(dlg.m, onDismiss)
+        is Dlg.Info -> InfoSheet(vm, dlg.m, onDismiss)
         is Dlg.Resize -> ResizeDialog(dlg.m, onDismiss) { w, h -> onDone(); vm.resize(dlg.m, w, h) }
         is Dlg.Wallpaper -> WallpaperDialog(vm, dlg.m, onDismiss)
     }
@@ -124,37 +133,80 @@ private fun RenameDialog(m: Media, onDismiss: () -> Unit, onRename: (String) -> 
 
 private val FULL = DateTimeFormatter.ofPattern("EEE, d MMM yyyy · h:mm a")
 
+
+/** Details: the date up top, then two tidy cards: what the file is, and where it lives. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun InfoDialog(m: Media, onDismiss: () -> Unit) {
+private fun InfoSheet(vm: GalleryViewModel, m: Media, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
-    var exif by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
-    LaunchedEffect(m) { exif = withContext(Dispatchers.IO) { exifRows(ctx, m) } }
-    val rows = buildList {
-        add("Name" to m.name)
-        add("Date taken" to FULL.format(Instant.ofEpochMilli(m.date).atZone(ZoneId.systemDefault())))
-        add("Modified" to FULL.format(Instant.ofEpochMilli(m.modified).atZone(ZoneId.systemDefault())))
-        add("Size" to Formatter.formatFileSize(ctx, m.size))
-        if (m.width > 0) add("Resolution" to "${m.width} × ${m.height}  ·  %.1f MP".format(m.width * m.height / 1e6))
-        if (m.isVideo) add("Duration" to duration(m.duration))
-        add("Type" to m.mime)
-        addAll(exif)
-        add("Path" to "/storage/emulated/0/${m.path}${m.name}")
+    var exif by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(m) { exif = withContext(Dispatchers.IO) { exifRows(ctx, m).toMap() } }
+    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val at = Instant.ofEpochMilli(m.date).atZone(ZoneId.systemDefault())
+    val kind = when {
+        m.isVideo -> "Video"
+        "screenshot" in m.path.lowercase() -> "Screenshot"
+        else -> exif["Camera"] ?: "Photo"
     }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Properties") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                rows.forEach { (k, v) ->
-                    Column {
-                        Text(k, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                        Text(v, style = MaterialTheme.typography.bodyMedium)
-                    }
+    val specs = listOfNotNull(
+        if (m.width > 0 && !m.isVideo) "%d MP".format(((m.width.toLong() * m.height + 500_000) / 1_000_000).coerceAtLeast(1)) else null,
+        if (m.width > 0) "${m.width} × ${m.height}" else null,
+        if (m.isVideo) clock(m.duration) else null,
+        m.mime.substringAfter('/').uppercase().takeIf { it.isNotBlank() && it != "*" },
+    ).joinToString("  ·  ")
+    val album = m.bucketId != -1L
+    fun openAlbum() { onDismiss(); vm.stack.add(Screen.Grid(Source.Bucket(m.bucketId, m.bucket))) }
+    ModalBottomSheet(onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.background) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+            Text(DAY_LONG.format(at), Modifier.padding(start = 4.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(TIME_ONLY.format(at), Modifier.padding(start = 4.dp, bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            InfoCard {
+                InfoRow(
+                    when { m.isVideo -> Icons.Outlined.Videocam; kind == "Screenshot" -> Icons.Outlined.Screenshot; else -> Icons.Outlined.PhotoCamera },
+                    kind, specs,
+                )
+                InfoRow(Icons.Outlined.InsertDriveFile, m.name, Formatter.formatShortFileSize(ctx, m.size).takeIf { m.size > 0 })
+                exif["Exposure"]?.let { InfoRow(Icons.Outlined.Camera, it, null) }
+                InfoRow(Icons.Outlined.LocationOn, exif["Location"] ?: "No location information", null, last = true)
+            }
+            if (album) {
+                Spacer(Modifier.height(12.dp))
+                InfoCard {
+                    InfoRow(Icons.Outlined.PhotoAlbum, vm.albumName(m.bucketId, m.bucket), "Phone/${m.path}", last = true, onClick = ::openAlbum)
                 }
             }
-        },
-        confirmButton = { TextButton(onDismiss) { Text("Close") } },
-    )
+        }
+    }
+}
+
+private val DAY_LONG = DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy")
+private val TIME_ONLY = DateTimeFormatter.ofPattern("h:mm a")
+
+@Composable
+private fun InfoCard(content: @Composable ColumnScope.() -> Unit) =
+    Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainer) { Column(content = content) }
+
+/** One compact details row: icon, value, small grey line under it; a chevron when it opens something. */
+@Composable
+private fun InfoRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String?,
+    last: Boolean = false, onClick: (() -> Unit)? = null,
+) {
+    Column {
+        Row(
+            Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                .padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.weight(1f).padding(start = 16.dp)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (onClick != null) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (!last) HorizontalDivider(Modifier.padding(start = 54.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
+    }
 }
 
 @Composable
@@ -209,7 +261,7 @@ private fun ResizeDialog(m: Media, onDismiss: () -> Unit, onResize: (Int, Int) -
         text = {
             Column {
                 Text("${pct.toInt()}%  ·  $w × $h", style = MaterialTheme.typography.titleMedium)
-                Slider(pct, { pct = it }, valueRange = 10f..90f, steps = 15)
+                AppSlider(pct, { pct = it }, range = 10f..90f, steps = 15, label = "Size")
                 Text(
                     "Saves a new copy next to the original.", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

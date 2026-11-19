@@ -70,7 +70,7 @@ fun ThemeSection(vm: GalleryViewModel) {
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Dim", Modifier.width(56.dp), style = MaterialTheme.typography.bodyMedium)
-                        Slider(vm.backgroundDim, vm::changeBackgroundDim, Modifier.weight(1f), valueRange = 0.1f..0.85f)
+                        AppSlider(vm.backgroundDim, vm::changeBackgroundDim, Modifier.weight(1f), range = 0.1f..0.85f, label = "Background dim")
                         Text("${(vm.backgroundDim * 100).toInt()}%", Modifier.width(44.dp), textAlign = TextAlign.End, style = MaterialTheme.typography.bodySmall)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -159,15 +159,19 @@ private fun ThemePreview(vm: GalleryViewModel) {
             }
             Spacer(Modifier.weight(1f))
             // mini tab bar
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(scheme.surfaceContainer).padding(6.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                listOf(Icons.Outlined.PhotoLibrary, Icons.Outlined.Image, Icons.Outlined.VideoLibrary, Icons.Outlined.PhotoAlbum).forEachIndexed { i, ic ->
-                    Box(
-                        Modifier.clip(RoundedCornerShape(50)).background(if (i == 0) scheme.secondaryContainer else Color.Transparent)
-                            .padding(horizontal = 12.dp, vertical = 3.dp),
-                    ) { Icon(ic, null, Modifier.size(18.dp), tint = if (i == 0) scheme.onSecondaryContainer else scheme.onSurfaceVariant) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.clip(RoundedCornerShape(50)).background(scheme.surfaceContainerHigh).padding(3.dp)) {
+                    listOf("All", "Photos", "Albums").forEachIndexed { i, l ->
+                        Text(
+                            l, Modifier.clip(RoundedCornerShape(50)).background(if (i == 0) scheme.surfaceContainer else Color.Transparent)
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            color = scheme.onSurface, fontSize = 11.sp, fontWeight = if (i == 0) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                    }
+                }
+                Spacer(Modifier.width(6.dp))
+                Box(Modifier.size(24.dp).clip(RoundedCornerShape(50)).background(scheme.surfaceContainerHigh), Alignment.Center) {
+                    Icon(Icons.Outlined.FilterList, null, Modifier.size(14.dp), tint = scheme.onSurface)
                 }
             }
         }

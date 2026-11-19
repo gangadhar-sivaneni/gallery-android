@@ -30,19 +30,20 @@ val ACCENTS: List<Pair<String, Int>> = listOf(
     "Green" to 0xFF43A047, "Teal" to 0xFF00A884, "Cyan" to 0xFF0097A7, "Slate" to 0xFF546E7A,
 ).map { (n, c) -> n to c.toInt() }
 
+// soft grey canvas with white cards and grey round buttons, like the phone's own Photos app
 private val LightBase = lightColorScheme(
-    background = Color(0xFFFFFFFF), onBackground = Color(0xFF1F1F1F),
-    surface = Color(0xFFFFFFFF), onSurface = Color(0xFF1F1F1F),
-    surfaceVariant = Color(0xFFF0F2F5), onSurfaceVariant = Color(0xFF5F6368),
-    surfaceContainer = Color(0xFFF3F5F8), surfaceContainerHigh = Color(0xFFEBEEF2),
-    outlineVariant = Color(0xFFDADCE0),
+    background = Color(0xFFF1F2F6), onBackground = Color(0xFF1A1A1A),
+    surface = Color(0xFFF1F2F6), onSurface = Color(0xFF1A1A1A),
+    surfaceVariant = Color(0xFFE4E5EA), onSurfaceVariant = Color(0xFF6B6E75),
+    surfaceContainer = Color(0xFFFFFFFF), surfaceContainerHigh = Color(0xFFE4E5EA),
+    outlineVariant = Color(0xFFDDDEE3),
 )
 
 private val DarkBase = darkColorScheme(
-    background = Color(0xFF111214), onBackground = Color(0xFFE3E3E3),
-    surface = Color(0xFF111214), onSurface = Color(0xFFE3E3E3),
-    surfaceVariant = Color(0xFF26282C), onSurfaceVariant = Color(0xFFB4B8BF),
-    surfaceContainer = Color(0xFF1B1C1F), surfaceContainerHigh = Color(0xFF232529),
+    background = Color(0xFF0E0E10), onBackground = Color(0xFFEDEDED),
+    surface = Color(0xFF0E0E10), onSurface = Color(0xFFEDEDED),
+    surfaceVariant = Color(0xFF26272B), onSurfaceVariant = Color(0xFFA9ACB3),
+    surfaceContainer = Color(0xFF1C1D20), surfaceContainerHigh = Color(0xFF2A2B2F),
     outlineVariant = Color(0xFF3A3D42),
 )
 
@@ -72,7 +73,7 @@ private fun buildScheme(dark: Boolean, accent: Color, mode: ThemeMode): ColorSch
     // keep the accent readable on its background
     val primary = if (dark) lerp(accent, Color.White, 0.22f) else accent
     val onPrimary = if (primary.luminance() > 0.5f) Color(0xFF111111) else Color.White
-    val canvas = if (dark) Color(0xFF111214) else Color.White
+    val canvas = if (dark) Color(0xFF0E0E10) else Color(0xFFF1F2F6)
     val container = lerp(accent, canvas, if (dark) 0.62f else 0.82f)
     val onContainer = if (dark) lerp(accent, Color.White, 0.78f) else lerp(accent, Color.Black, 0.55f)
     return base.copy(
@@ -105,4 +106,16 @@ fun AppBackdrop(vm: GalleryViewModel) {
         )
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = vm.backgroundDim)))
     }
+}
+
+/** Large screen titles ("Photos", "Albums") are big and bold, the rest stays Material default. */
+val AppTypography = androidx.compose.material3.Typography().let { t ->
+    t.copy(
+        headlineMedium = t.headlineMedium.copy(
+            fontSize = androidx.compose.ui.unit.TextUnit(34f, androidx.compose.ui.unit.TextUnitType.Sp),
+            lineHeight = androidx.compose.ui.unit.TextUnit(40f, androidx.compose.ui.unit.TextUnitType.Sp),
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+        ),
+        titleLarge = t.titleLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+    )
 }

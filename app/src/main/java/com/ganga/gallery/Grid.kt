@@ -89,7 +89,8 @@ private sealed interface Cell {
     data class Item(val m: Media) : Cell
 }
 
-private val DAY = DateTimeFormatter.ofPattern("EEE, d MMM yyyy")
+private val DAY = DateTimeFormatter.ofPattern("d MMM yyyy")
+private val SHORT_DAY = DateTimeFormatter.ofPattern("d MMM")
 private val MONTH = DateTimeFormatter.ofPattern("MMMM yyyy")
 fun dayOf(ms: Long): LocalDate = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate()
 fun dayLabel(d: LocalDate): String {
@@ -97,7 +98,7 @@ fun dayLabel(d: LocalDate): String {
     return when (d) {
         today -> "Today"
         today.minusDays(1) -> "Yesterday"
-        else -> d.format(DAY)
+        else -> d.format(if (d.year == today.year) SHORT_DAY else DAY)
     }
 }
 
@@ -144,7 +145,9 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
     val bucket = source as? Source.Bucket
     // picker mode: every tap selects; the bar offers "Move here" / "Copy here"
     val selecting = selected.isNotEmpty() || pick != null
+    val home = onBack == null && pick == null
     val title = bucket?.let { vm.albumName(it.id, it.name) } ?: source.title()
+    val state = rememberLazyGridState()
     val cols = if (isLandscape()) (vm.columns * 1.8f).toInt() else vm.columns
     val haptic = LocalHapticFeedback.current
     var suppressClickUntil by remember { mutableLongStateOf(0L) }
@@ -157,7 +160,8 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            AppBar(
+                large = home && !selecting && !searching,
                 navigationIcon = {
                     when {
                         pick != null -> IconButton({ onBack?.invoke() }) { Icon(Icons.Default.Close, "Cancel") }
@@ -181,10 +185,11 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
                             ),
                             modifier = Modifier.fillMaxWidth(),
                         )
+                        home -> Text(title, maxLines = 1)
                         else -> Column {
                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                             Text(
-                                if (inVault) "Locks when you leave" else "${items.size} items", style = MaterialTheme.typography.labelMedium,
+                                if (inVault) "Locks when you leave" else if (vm.loading) "Loading…" else "${items.size} items", style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -197,11 +202,11 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
                             Icon(if (all) Icons.Default.Deselect else Icons.Default.SelectAll, if (all) "Select none" else "Select all")
                         }
                     } else if (!searching) {
-                        IconButton({ searching = true }) { Icon(Icons.Default.Search, "Search") }
-                        IconButton({ options = true }) { Icon(Icons.Default.Tune, "View options") }
+                        HeaderButton(Icons.Default.Search, "Search") { searching = true }
                         Box {
-                            IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "More options") }
+                            HeaderButton(Icons.Default.MoreVert, "More options") { menu = true }
                             AppMenu(menu, { menu = false }) {
+                                MenuItem("View options", Icons.Default.Tune) { menu = false; options = true }
                                 if (bucket != null && items.isNotEmpty()) {
                                     MenuItem("Add photos here", Icons.Outlined.AddPhotoAlternate) {
                                         menu = false; vm.stack.add(Screen.Pick(items.first().path, title))
@@ -228,7 +233,6 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
         bottomBar = {
@@ -241,7 +245,6 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
             }
         },
     ) { pad ->
-        val state = rememberLazyGridState()
         val dir = LocalLayoutDirection.current
         // sides too: in landscape the notch and the nav bar sit left/right of the grid
         PullToRefreshBox(vm.refreshing, { vm.reload(manual = true) }, Modifier.fillMaxSize().padding(
@@ -263,11 +266,11 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
                         columns = GridCells.Fixed(cols),
                         state = state,
                         contentPadding = PaddingValues(
-                            start = if (vm.roundedThumbs) 4.dp else 0.dp, end = if (vm.roundedThumbs) 4.dp else 0.dp,
-                            bottom = pad.calculateBottomPadding() + 8.dp,
+                            start = if (vm.roundedThumbs) 3.dp else 0.dp, end = if (vm.roundedThumbs) 3.dp else 0.dp,
+                            bottom = pad.calculateBottomPadding() + LocalBottomBarSpace.current + 8.dp,
                         ),
-                        horizontalArrangement = Arrangement.spacedBy(if (vm.roundedThumbs) 4.dp else 2.dp),
-                        verticalArrangement = Arrangement.spacedBy(if (vm.roundedThumbs) 4.dp else 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (vm.roundedThumbs) 3.dp else 1.dp),
+                        verticalArrangement = Arrangement.spacedBy(if (vm.roundedThumbs) 3.dp else 1.dp),
                         modifier = Modifier.fillMaxSize().pinchToResize(vm).dragToSelect(
                             state, cells,
                             idAt = { i -> (cells.getOrNull(i) as? Cell.Item)?.m?.id },
@@ -287,10 +290,10 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
                         ) { cell ->
                             when (cell) {
                                 is Cell.Header -> Row(
-                                    Modifier.fillMaxWidth().padding(16.dp, 18.dp, 8.dp, 8.dp),
+                                    Modifier.fillMaxWidth().padding(start = 13.dp, top = 18.dp, end = 8.dp, bottom = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text(cell.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                    Text(cell.label, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                                     if (selecting) {
                                         val all = selected.containsAll(cell.ids)
                                         IconButton({ selected = if (all) selected - cell.ids.toSet() else selected + cell.ids }, Modifier.size(28.dp)) {
@@ -305,7 +308,7 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
                                     val m = cell.m
                                     val isSel = m.id in selected
                                     Thumb(
-                                        m, selecting, isSel, vm.isHidden(m), vm.roundedThumbs, vm.imageEpoch, compact = cols >= 5,
+                                        m, selecting, isSel, vm.isHidden(m), vm.thumbCorner, vm.imageEpoch, compact = cols >= 5,
                                         onClick = {
                                             // the finger lifting after a long-press/drag isn't a tap
                                             if (android.os.SystemClock.uptimeMillis() >= suppressClickUntil) {
@@ -319,7 +322,7 @@ fun MediaGrid(vm: GalleryViewModel, source: Source, ask: Ask, onBack: (() -> Uni
                         }
                     }
                     FastScroller(
-                        state, cells.size, Modifier.align(Alignment.CenterEnd).padding(bottom = pad.calculateBottomPadding()),
+                        state, cells.size, Modifier.align(Alignment.CenterEnd).padding(bottom = pad.calculateBottomPadding() + LocalBottomBarSpace.current),
                     ) { i ->
                         when (val c = cells.getOrNull(i)) {
                             is Cell.Header -> c.label
@@ -353,9 +356,9 @@ fun Empty(text: String) = Box(Modifier.fillMaxSize().padding(horizontal = 32.dp)
 
 @Composable
 fun MenuItem(text: String, icon: ImageVector, enabled: Boolean = true, onClick: () -> Unit) = DropdownMenuItem(
-    { Text(text, style = MaterialTheme.typography.bodyLarge) }, onClick, enabled = enabled,
-    leadingIcon = { Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
+    { Text(text, style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp)) }, onClick, enabled = enabled,
+    leadingIcon = { Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+    contentPadding = PaddingValues(horizontal = 16.dp), modifier = Modifier.height(44.dp),
 )
 
 /** Every menu in the app: solid (never see-through), rounded, lifted off the page so it's always readable. */
@@ -363,7 +366,7 @@ fun MenuItem(text: String, icon: ImageVector, enabled: Boolean = true, onClick: 
 fun AppMenu(expanded: Boolean, onDismissRequest: () -> Unit, content: @Composable ColumnScope.() -> Unit) = DropdownMenu(
     expanded, onDismissRequest,
     shape = RoundedCornerShape(18.dp),
-    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 1f),
+    containerColor = MaterialTheme.colorScheme.surfaceContainer, // white cards in light mode, like the phone app
     tonalElevation = 0.dp, shadowElevation = 10.dp,
     content = content,
 )
@@ -592,37 +595,34 @@ private fun FastScroller(state: LazyGridState, count: Int, modifier: Modifier, l
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Thumb(
-    m: Media, selecting: Boolean, isSel: Boolean, hidden: Boolean, rounded: Boolean, epoch: Int, compact: Boolean,
+    m: Media, selecting: Boolean, isSel: Boolean, hidden: Boolean, cornerDp: Int, epoch: Int, compact: Boolean,
     onClick: () -> Unit,
 ) {
     val ctx = LocalContext.current
-    val corner = if (rounded) (if (compact) 6.dp else 8.dp) else 0.dp
+    val corner = (if (compact) cornerDp * 0.6f else cornerDp.toFloat()).dp
     // selection shrinks the photo smoothly instead of jumping
-    val selScale by animateFloatAsState(if (isSel) 0.86f else 1f, tween(160), label = "sel")
-    val selCorner by animateDpAsState(if (isSel) 10.dp else corner, tween(160), label = "corner")
+    // ponytail: animations only exist while selecting, so scrolling builds tiles without them
+    val selScale = if (selecting) animateFloatAsState(if (isSel) 0.86f else 1f, tween(160), label = "sel").value else 1f
+    val selCorner = if (selecting) animateDpAsState(if (isSel) 10.dp else corner, tween(160), label = "corner").value else corner
     var thumbFailed by remember(m.uri) { mutableStateOf(false) }
     Box(Modifier.aspectRatio(1f).clip(RoundedCornerShape(corner)).clickable(onClick = onClick)) {
         AsyncImage(
-            model = ImageRequest.Builder(ctx).data(m.uri).memoryCacheKey("t${m.id}:${m.size}:${m.modified}:$epoch").build(),
+            model = ImageRequest.Builder(ctx).data(ThumbReq(m.uri, 256, m.isVideo)).memoryCacheKey("t${m.id}:${m.size}:${m.modified}:$epoch").build(),
             contentDescription = m.name,
             contentScale = ContentScale.Crop,
             alpha = if (hidden) 0.5f else 1f,
             onError = { thumbFailed = true },
-            modifier = Modifier.fillMaxSize().scale(selScale).clip(RoundedCornerShape(selCorner))
+            modifier = Modifier.fillMaxSize().then(if (selecting) Modifier.scale(selScale).clip(RoundedCornerShape(selCorner)) else Modifier)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         )
-        if (m.isVideo) Row(
-            Modifier.align(Alignment.BottomEnd).padding(if (compact) 3.dp else 5.dp)
-                .background(Color.Black.copy(.6f), RoundedCornerShape(if (compact) 4.dp else 6.dp))
-                .padding(horizontal = if (compact) 3.dp else 5.dp, vertical = if (compact) 0.dp else 1.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (!compact) Icon(Icons.Default.PlayArrow, null, Modifier.size(13.dp), tint = Color.White)
-            Text(
-                duration(m.duration), color = Color.White, fontSize = if (compact) 9.sp else 11.sp,
-                maxLines = 1, softWrap = false, lineHeight = if (compact) 11.sp else 14.sp,
-            )
-        }
+        if (m.isVideo) Text(
+            clock(m.duration),
+            Modifier.align(Alignment.BottomStart).padding(if (compact) 3.dp else 6.dp)
+                .background(Color.Black.copy(.45f), CircleShape)
+                .padding(horizontal = if (compact) 4.dp else 7.dp, vertical = if (compact) 0.dp else 2.dp),
+            color = Color.White, fontSize = if (compact) 9.sp else 12.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, softWrap = false, lineHeight = if (compact) 11.sp else 15.sp,
+        )
         // unreadable format: show its extension instead of an empty tile
         if (thumbFailed) Text(
             m.name.substringAfterLast('.', "?").uppercase().take(4), Modifier.align(Alignment.Center),
@@ -634,7 +634,7 @@ fun Thumb(
         )
         if (m.favorite) Icon(
             Icons.Default.Favorite, null,
-            Modifier.align(Alignment.BottomStart).padding(if (compact) 3.dp else 5.dp).size(if (compact) 11.dp else 15.dp), tint = Color.White,
+            Modifier.align(Alignment.BottomEnd).padding(if (compact) 3.dp else 6.dp).size(if (compact) 11.dp else 15.dp), tint = Color.White,
         )
         if (selecting) Icon(
             if (isSel) Icons.Default.CheckCircle else Icons.Outlined.Circle, null,
@@ -691,4 +691,49 @@ fun ViewOptionsSheet(vm: GalleryViewModel, onDismiss: () -> Unit) {
             Text("Tip: pinch the grid with two fingers to change columns.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/** Top bar used by the main screens; [large] gives the big bold title next to the buttons. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppBar(
+    large: Boolean, title: @Composable () -> Unit,
+    navigationIcon: @Composable () -> Unit = {}, actions: @Composable RowScope.() -> Unit = {},
+) {
+    val bg = MaterialTheme.colorScheme.background
+    TopAppBar(
+        {
+            // one steady size: the title never jumps while scrolling
+            if (large) ProvideTextStyle(MaterialTheme.typography.headlineMedium.copy(fontSize = 30.sp, lineHeight = 36.sp)) { title() }
+            else title()
+        },
+        navigationIcon = navigationIcon, actions = actions,
+        expandedHeight = if (large) 76.dp else TopAppBarDefaults.TopAppBarExpandedHeight,
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = bg, scrolledContainerColor = bg),
+    )
+}
+
+/** Round grey header button (search, more…). */
+@Composable
+fun HeaderButton(icon: ImageVector, description: String, onClick: () -> Unit) = IconButton(
+    onClick, Modifier.padding(horizontal = 4.dp).size(44.dp),
+    colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+) { Icon(icon, description, Modifier.size(22.dp)) }
+
+/** "00:20" style clock for video tiles. */
+fun clock(ms: Long): String {
+    val s = ms / 1000
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%02d:%02d".format(s / 60, s % 60)
+}
+
+/** Menu row for picking one option: the chosen one is coloured and ticked (no radio buttons). */
+@Composable
+fun ChoiceItem(text: String, selected: Boolean, onClick: () -> Unit) {
+    val c = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+    DropdownMenuItem(
+        { Text(text, color = c, style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp), fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal) },
+        onClick,
+        trailingIcon = { if (selected) Icon(Icons.Default.Check, "Selected", Modifier.size(20.dp), tint = c) else Spacer(Modifier.size(20.dp)) },
+        contentPadding = PaddingValues(horizontal = 18.dp), modifier = Modifier.height(44.dp),
+    )
 }

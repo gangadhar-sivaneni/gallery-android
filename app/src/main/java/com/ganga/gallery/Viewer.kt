@@ -13,6 +13,12 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -57,6 +63,17 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.runtime.withFrameMillis
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.shape.CircleShape
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
@@ -67,7 +84,10 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-private val TIME = DateTimeFormatter.ofPattern("d MMM yyyy · h:mm a")
+private val DATE = DateTimeFormatter.ofPattern("d MMMM")
+private val DATE_SHORT = DateTimeFormatter.ofPattern("d MMM")
+private val DATE_YEAR = DateTimeFormatter.ofPattern("d MMMM yyyy")
+private val CLOCK = DateTimeFormatter.ofPattern("h:mm a")
 
 /** Video picture shapes. Fixed ratios letterbox the player into that shape and stretch to fill it. */
 enum class VideoAspect(val label: String, val ratio: Float?, val mode: Int) {
@@ -148,7 +168,7 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
         ) { page ->
             val m = items[page]
             val current = page == pager.currentPage
-            if (m.isVideo) VideoPage(vm, m, active = current && !slideshow, locked = videoLocked && current, aspect = aspect, speed = speed) { chrome = it }
+            if (m.isVideo) VideoPage(vm, m, active = current && !slideshow, locked = videoLocked && current, aspect = aspect, speed = speed, controls = chrome) { chrome = it }
             else ZoomableImage(m, current, vm.imageEpoch) {
                 if (slideshow) slideshow = false
                 chrome = !chrome
@@ -161,12 +181,13 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
             TopAppBar(
                 navigationIcon = { IconButton(leave) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 title = {
+                    val at = Instant.ofEpochMilli(cur.date).atZone(ZoneId.systemDefault())
                     Column {
-                        Text(cur.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
-                            TIME.format(Instant.ofEpochMilli(cur.date).atZone(ZoneId.systemDefault())),
-                            style = MaterialTheme.typography.labelMedium, color = Color.White.copy(.75f), maxLines = 1,
+                            if (external) cur.name else (if (cur.isVideo) DATE_SHORT else if (at.year == java.time.Year.now().value) DATE else DATE_YEAR).format(at),
+                            style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
+                        if (!external) Text(CLOCK.format(at), style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(.75f), maxLines = 1)
                     }
                 },
                 actions = {
@@ -177,55 +198,43 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
                             }
                             AppMenu(speedMenu, { speedMenu = false }) {
                                 SPEEDS.forEach { sp ->
-                                    DropdownMenuItem({ Text(speedLabel(sp)) }, { speedMenu = false; speed = sp }, leadingIcon = { RadioButton(speed == sp, null) })
-                                }
-                            }
-                        }
-                        Box {
-                            IconButton({ aspectMenu = true }) { Icon(Icons.Outlined.AspectRatio, "Aspect ratio") }
-                            AppMenu(aspectMenu, { aspectMenu = false }) {
-                                VideoAspect.entries.forEach { a ->
-                                    DropdownMenuItem({ Text(a.label) }, { aspectMenu = false; aspect = a }, leadingIcon = { RadioButton(aspect == a, null) })
+                                    ChoiceItem(speedLabel(sp), speed == sp) { speedMenu = false; speed = sp }
                                 }
                             }
                         }
                         if (pipSupported) IconButton({ vm.pipParams?.let { runCatching { activity.enterPictureInPictureMode(it) } } }) {
                             Icon(Icons.Outlined.PictureInPictureAlt, "Picture in picture")
                         }
-                        IconButton({ videoLocked = true; chrome = false }) { Icon(Icons.Outlined.Lock, "Lock controls") }
-                    } else {
-                        if (full && (cur.mime == "image/jpeg" || cur.mime == "image/png")) IconButton({ ask(vm.writeRequest(listOf(cur))) { vm.rotate(listOf(cur)) } }) {
-                            Icon(Icons.Outlined.RotateRight, "Rotate")
-                        }
-                        if (!external) IconButton({ dialog = Dlg.Info(cur) }) { Icon(Icons.Outlined.Info, "Properties") }
                     }
-                    if (external) IconButton({ openWith(ctx, cur) }) { Icon(Icons.AutoMirrored.Outlined.OpenInNew, "Open with") }
-                    if (!external) Box {
+                    // files from other apps have Save / Open with in the bottom bar; videos still get a menu for their player options
+                    if (!external || cur.isVideo) Box {
                         IconButton({ more = true }) { Icon(Icons.Default.MoreVert, "More options") }
+                        AppMenu(aspectMenu, { aspectMenu = false }) {
+                            VideoAspect.entries.forEach { a -> ChoiceItem(a.label, aspect == a) { aspectMenu = false; aspect = a } }
+                        }
                         AppMenu(more, { more = false; moreAll = false }) {
                             val close = { more = false; moreAll = false }
                             val photo = !cur.isVideo
+                            if (cur.isVideo) {
+                                MenuItem("Aspect ratio: ${aspect.label}", Icons.Outlined.AspectRatio) { close(); aspectMenu = true }
+                                MenuItem("Lock controls", Icons.Outlined.Lock) { close(); videoLocked = true; chrome = false }
+                            }
                             // common actions first; the rest sit behind "View more"
-                            if (cur.isVideo && full) MenuItem("Edit video", Icons.Outlined.ContentCut) { close(); vm.stack.add(Screen.VideoEditor(cur)) }
                             if (cur.isVideo) MenuItem(if (landscape) "Portrait" else "Landscape", Icons.Outlined.ScreenRotation) { close(); rotateScreen() }
                             if (photo && (full || inVault)) MenuItem("Slideshow", Icons.Outlined.Slideshow) { close(); slideshow = true; chrome = false }
+                            if (photo && full && (cur.mime == "image/jpeg" || cur.mime == "image/png")) MenuItem("Rotate", Icons.Outlined.RotateRight) {
+                                close(); ask(vm.writeRequest(listOf(cur))) { vm.rotate(listOf(cur)) }
+                            }
+                            if (photo && full && !cur.isGif) MenuItem("Set as wallpaper", Icons.Outlined.Wallpaper) { close(); dialog = Dlg.Wallpaper(cur) }
                             if (full) {
                                 MenuItem("Move to album", Icons.Outlined.DriveFileMove) { close(); dialog = Dlg.Move(listOf(cur), false) }
                                 MenuItem("Copy to album", Icons.Outlined.ContentCopy) { close(); dialog = Dlg.Move(listOf(cur), true) }
                                 MenuItem("Rename", Icons.Outlined.DriveFileRenameOutline) { close(); dialog = Dlg.Rename(cur) }
-                                MenuItem("Move to Private", Icons.Outlined.Lock) { close(); vm.moveToVault(listOf(cur), ask) }
+                                MenuItem("Move to Private", Icons.Outlined.Shield) { close(); vm.moveToVault(listOf(cur), ask) }
                             }
                             if (!moreAll) MenuItem("View more", Icons.Outlined.ExpandMore) { moreAll = true }
                             else {
                                 HorizontalDivider()
-                                if (cur.isVideo && full) {
-                                    MenuItem("Share", Icons.Outlined.Share) { close(); share(ctx, listOf(cur)) }
-                                    MenuItem(if (cur.favorite) "Remove favorite" else "Add to favorites", Icons.Outlined.FavoriteBorder) {
-                                        close(); ask(vm.favoriteRequest(listOf(cur), !cur.favorite), null)
-                                    }
-                                    MenuItem("Move to trash", Icons.Outlined.Delete) { close(); ask(vm.trashRequest(listOf(cur), true), null) }
-                                }
-                                if (cur.isVideo) MenuItem("Properties", Icons.Outlined.Info) { close(); dialog = Dlg.Info(cur) }
                                 if (full) {
                                     val hidden = vm.isHidden(cur)
                                     MenuItem(if (hidden) "Unhide" else "Hide", if (hidden) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff) {
@@ -260,37 +269,51 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
             )
         }
 
-        // videos use the player's own bottom controls; photos get our action bar
-        AnimatedVisibility(chrome && !cur.isVideo && !vm.inPip, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            Row(
-                Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(.75f))))
-                    .navigationBarsPadding().padding(top = 16.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                when {
-                    external -> {
-                        BarAction(Icons.Outlined.Share, "Share", Color.White) { share(ctx, listOf(cur)) }
-                        BarAction(Icons.Outlined.Edit, "Edit", Color.White) { edit(ctx, cur) }
-                    }
-                    inVault -> {
-                        BarAction(Icons.Outlined.LockOpen, "Move out", Color.White) { vm.restoreFromVault(listOf(cur)) }
-                        BarAction(Icons.Outlined.DeleteForever, "Delete", Color.White) { confirmVaultDelete = true }
-                    }
-                    inTrash -> {
-                        BarAction(Icons.Outlined.RestoreFromTrash, "Restore", Color.White) { ask(vm.trashRequest(listOf(cur), false), null) }
-                        BarAction(Icons.Outlined.DeleteForever, "Delete", Color.White) { ask(vm.deleteRequest(listOf(cur)), null) }
-                    }
-                    else -> {
-                        BarAction(Icons.Outlined.Share, "Share", Color.White) { share(ctx, listOf(cur)) }
-                        BarAction(
-                            if (cur.favorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, "Favorite",
-                            if (cur.favorite) Color(0xFFFF6B81) else Color.White,
-                        ) { ask(vm.favoriteRequest(listOf(cur), !cur.favorite), null) }
-                        if (!cur.isGif) BarAction(Icons.Outlined.Edit, "Edit", Color.White) { vm.stack.add(Screen.Editor(cur)) }
-                        if (!cur.isGif) BarAction(Icons.Outlined.Wallpaper, "Wallpaper", Color.White) { dialog = Dlg.Wallpaper(cur) }
-                        BarAction(Icons.Outlined.Delete, "Delete", Color.White) { ask(vm.trashRequest(listOf(cur), true), null) }
-                    }
-                }
+        // like the phone's Photos app: round Share | Favourite · Edit · Delete pill | round Details
+        AnimatedVisibility(chrome && !videoLocked && !vm.inPip, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
+            val info = Act(Icons.Outlined.Info, "Details") { dialog = Dlg.Info(cur) }
+            when {
+                external -> ViewerBar(
+                    Act(Icons.Outlined.Share, "Share") { share(ctx, listOf(cur)) },
+                    listOf(
+                        Act(Icons.Outlined.SaveAlt, "Save to gallery") { vm.saveToGallery(cur) },
+                        Act(Icons.Outlined.Edit, "Edit with") { edit(ctx, cur) },
+                    ),
+                    Act(Icons.AutoMirrored.Outlined.OpenInNew, "Open with") { openWith(ctx, cur) },
+                )
+                inVault -> ViewerBar(
+                    null,
+                    listOf(
+                        Act(Icons.Outlined.LockOpen, "Move out of Private") { vm.restoreFromVault(listOf(cur)) },
+                        Act(Icons.Outlined.DeleteForever, "Delete forever") { confirmVaultDelete = true },
+                    ),
+                    info,
+                )
+                inTrash -> ViewerBar(
+                    null,
+                    listOf(
+                        Act(Icons.Outlined.RestoreFromTrash, "Restore") { ask(vm.trashRequest(listOf(cur), false), null) },
+                        Act(Icons.Outlined.DeleteForever, "Delete forever") { ask(vm.deleteRequest(listOf(cur)), null) },
+                    ),
+                    info,
+                )
+                else -> ViewerBar(
+                    Act(Icons.Outlined.Share, "Share") { share(ctx, listOf(cur)) },
+                    listOfNotNull(
+                        Act(
+                            if (cur.favorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                            if (cur.favorite) "Remove from favourites" else "Favourite",
+                            if (cur.favorite) Color(0xFFFF5470) else Color.White,
+                        ) { ask(vm.favoriteRequest(listOf(cur), !cur.favorite), null) },
+                        when {
+                            cur.isVideo -> Act(Icons.Outlined.Edit, "Edit video") { vm.stack.add(Screen.VideoEditor(cur)) }
+                            !cur.isGif -> Act(Icons.Outlined.Edit, "Edit") { vm.stack.add(Screen.Editor(cur)) }
+                            else -> null
+                        },
+                        Act(Icons.Outlined.Delete, "Delete") { ask(vm.trashRequest(listOf(cur), true), null) },
+                    ),
+                    info,
+                )
             }
         }
     }
@@ -363,6 +386,18 @@ private fun ZoomableImage(m: Media, current: Boolean, epoch: Int, onTap: () -> U
         val my = size.height * (s - 1) / 2
         return Offset(o.x.coerceIn(-mx, mx), o.y.coerceIn(-my, my))
     }
+    // the layer scales round its centre, so to keep point [c] still while zooming by [k]: o' = (c - centre)(1 - k) + o·k
+    fun zoomAt(c: Offset, k: Float, o: Offset) = zoomOffset(c, Offset(size.width / 2f, size.height / 2f), k, o)
+    val scope = rememberCoroutineScope()
+    fun animateTo(s1: Float, o1: Offset) {
+        val s0 = scale; val o0 = offset
+        scope.launch {
+            androidx.compose.animation.core.animate(0f, 1f, animationSpec = androidx.compose.animation.core.tween(220)) { t, _ ->
+                scale = s0 + (s1 - s0) * t
+                offset = o0 + (o1 - o0) * t
+            }
+        }
+    }
     AsyncImage(
         // ponytail: capped at 3072px to stay clear of OOM; tile-based decoding if 50MP+ zoom detail matters
         model = ImageRequest.Builder(ctx).data(m.uri).size(3072).memoryCacheKey("f${m.id}:${m.size}:${m.modified}:$epoch").build(),
@@ -374,12 +409,10 @@ private fun ZoomableImage(m: Media, current: Boolean, epoch: Int, onTap: () -> U
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { onTap() },
+                    // double-tap zooms smoothly into the tapped spot, and back out
                     onDoubleTap = { p ->
-                        if (scale > 1f) { scale = 1f; offset = Offset.Zero }
-                        else {
-                            scale = 2.5f
-                            offset = clamp((Offset(size.width / 2f, size.height / 2f) - p) * 1.5f, scale)
-                        }
+                        if (scale > 1f) animateTo(1f, Offset.Zero)
+                        else animateTo(2.5f, clamp(zoomAt(p, 2.5f, Offset.Zero), 2.5f))
                     },
                 )
             }
@@ -389,8 +422,13 @@ private fun ZoomableImage(m: Media, current: Boolean, epoch: Int, onTap: () -> U
                     do {
                         val e = awaitPointerEvent()
                         if (e.changes.size > 1 || scale > 1f) {
-                            scale = (scale * e.calculateZoom()).coerceIn(1f, 8f)
-                            offset = if (scale == 1f) Offset.Zero else clamp(offset + e.calculatePan(), scale)
+                            // zoom round the point between the fingers, then follow the fingers' movement
+                            val next = (scale * e.calculateZoom()).coerceIn(1f, 8f)
+                            val c = e.calculateCentroid(useCurrent = true)
+                            val k = next / scale
+                            val zoomed = if (c.isSpecified) zoomAt(c, k, offset) else offset * k
+                            offset = if (next == 1f) Offset.Zero else clamp(zoomed + e.calculatePan(), next)
+                            scale = next
                             e.changes.forEach { if (it.positionChanged()) it.consume() }
                         }
                     } while (e.changes.any { it.pressed })
@@ -404,7 +442,7 @@ private fun ZoomableImage(m: Media, current: Boolean, epoch: Int, onTap: () -> U
 @Composable
 private fun VideoPage(
     vm: GalleryViewModel, m: Media, active: Boolean, locked: Boolean, aspect: VideoAspect, speed: Float,
-    onControls: (Boolean) -> Unit,
+    controls: Boolean, onControls: (Boolean) -> Unit,
 ) {
     if (!active) {
         Box(Modifier.fillMaxSize(), Alignment.Center) {
@@ -474,6 +512,7 @@ private fun VideoPage(
     val padL = bars.getLeft(density, dir)
     val padR = bars.getRight(density, dir)
     val padB = bars.getBottom(density)
+    val barBottom = with(density) { padB.toDp() } + VIEWER_BAR_SPACE
     // gestures: hold = 2x, swipe up/down on the left = brightness, on the right = volume.
     // Taps and sideways swipes are left alone so the controls and the pager still work.
     val audio = remember { ctx.getSystemService(android.media.AudioManager::class.java) }
@@ -488,7 +527,7 @@ private fun VideoPage(
         val edge = 56.dp.toPx() // keep clear of the status bar pull-down and the seek bar
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-            if (down.position.y < edge || down.position.y > size.height - edge * 1.6f) return@awaitEachGesture
+            if (down.position.y < edge || down.position.y > size.height - edge * 4f) return@awaitEachGesture
             val slop = viewConfiguration.touchSlop
             var drag = Offset.Zero
             var moved = false
@@ -539,34 +578,26 @@ private fun VideoPage(
             }
         }
     }
-    Box(Modifier.fillMaxSize().then(gestures), Alignment.Center) {
+    // controls hide by themselves a moment after playback starts
+    LaunchedEffect(controls, isPlaying) { if (controls && isPlaying && !locked) { delay(3500); onControls(false) } }
+    val taps = if (locked || vm.inPip) Modifier else Modifier.pointerInput(Unit) {
+        detectTapGestures(
+            onTap = { onControls(!controls) },
+            // double-tap the left / right half to jump 10 s back / forward
+            onDoubleTap = { p -> if (p.x < size.width / 2f) player.seekBack() else player.seekForward() },
+        )
+    }
+    Box(Modifier.fillMaxSize().then(gestures).then(taps), Alignment.Center) {
         AndroidView(
             factory = {
-                PlayerView(it).apply {
-                    this.player = player
-                    setShowNextButton(false); setShowPreviousButton(false)
-                    setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v -> onControls(v == View.VISIBLE) })
-                }
+                PlayerView(it).apply { this.player = player; useController = false }
             },
-            update = { pv ->
-                pv.resizeMode = aspect.mode
-                pv.useController = !locked && !vm.inPip
-                pv.setShowSubtitleButton(hasSubs) // CC button only for videos that have subtitles
-                if (locked || vm.inPip) pv.hideController()
-                // pad the controls, but stretch the dark scrim back over the padding so it covers the whole screen
-                (pv.findViewById<View>(androidx.media3.ui.R.id.exo_bottom_bar)?.parent as? android.view.ViewGroup)?.let { root ->
-                    root.setPadding(padL, 0, padR, padB)
-                    root.clipToPadding = false
-                    root.findViewById<View>(androidx.media3.ui.R.id.exo_controls_background)?.let { bg ->
-                        val lp = bg.layoutParams as android.view.ViewGroup.MarginLayoutParams
-                        if (lp.leftMargin != -padL || lp.rightMargin != -padR || lp.bottomMargin != -padB) {
-                            lp.setMargins(-padL, 0, -padR, -padB); bg.layoutParams = lp
-                        }
-                    }
-                }
-            },
+            update = { pv -> pv.resizeMode = aspect.mode },
             modifier = aspect.ratio?.let { Modifier.aspectRatio(it) } ?: Modifier.fillMaxSize(),
         )
+        AnimatedVisibility(controls && !locked && !vm.inPip, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
+            VideoControls(player, isPlaying, hasSubs, Modifier.padding(bottom = barBottom))
+        }
         if (askWrite) AlertDialog(
             onDismissRequest = { askWrite = false },
             title = { Text("Control phone brightness") },
@@ -628,3 +659,118 @@ private fun sidecarSubtitles(m: Media): List<MediaItem.SubtitleConfiguration> = 
         }
     }
 }.getOrDefault(emptyList())
+
+/** One button of the viewer's bottom bar. [label] is read by TalkBack. */
+private class Act(val icon: ImageVector, val label: String, val tint: Color = Color.White, val onClick: () -> Unit)
+
+/** Height the viewer bottom bar takes above the navigation bar; the video controls sit just above it. */
+val VIEWER_BAR_SPACE = 84.dp
+
+/** Dark floating bar: a round button left and right, the main actions grouped in a pill in the middle. */
+@Composable
+private fun ViewerBar(left: Act?, center: List<Act>, right: Act?) {
+    val fill = Color(0xFF2A2A2C).copy(alpha = .92f)
+    Box(
+        Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+    ) {
+        if (left != null) RoundAct(left, fill, Modifier.align(Alignment.CenterStart))
+        Row(
+            Modifier.align(Alignment.Center).clip(CircleShape).background(fill).padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            center.forEach { a ->
+                IconButton(a.onClick, Modifier.size(48.dp)) {
+                    // the heart pops when it fills in
+                    AnimatedContent(
+                        a.icon to a.tint, label = "pop",
+                        transitionSpec = {
+                            (scaleIn(spring(dampingRatio = .4f, stiffness = 500f), initialScale = .3f) + fadeIn()) togetherWith
+                                (scaleOut(targetScale = 1.3f) + fadeOut())
+                        },
+                    ) { (icon, tint) -> Icon(icon, a.label, Modifier.size(26.dp), tint = tint) }
+                }
+            }
+        }
+        if (right != null) RoundAct(right, fill, Modifier.align(Alignment.CenterEnd))
+    }
+}
+
+@Composable
+private fun RoundAct(a: Act, fill: Color, modifier: Modifier) = IconButton(
+    a.onClick, modifier.size(56.dp), colors = IconButtonDefaults.iconButtonColors(containerColor = fill),
+) { Icon(a.icon, a.label, Modifier.size(26.dp), tint = a.tint) }
+
+/** Play/pause · time · seek bar · subtitles · mute, in one row above the bottom bar (like the phone's own player). */
+@Composable
+private fun VideoControls(player: Player, playing: Boolean, hasSubs: Boolean, modifier: Modifier) {
+    var pos by remember { mutableLongStateOf(player.currentPosition) }
+    var dur by remember { mutableLongStateOf(player.duration.coerceAtLeast(0L)) }
+    var drag by remember { mutableStateOf<Float?>(null) }
+    var muted by remember { mutableStateOf(player.volume == 0f) }
+    var subsOn by remember { mutableStateOf(true) }
+    // every frame while playing (smooth line), slower when paused
+    LaunchedEffect(player, playing) {
+        while (true) {
+            pos = player.currentPosition; dur = player.duration.coerceAtLeast(0L)
+            if (playing) withFrameMillis { } else delay(250)
+        }
+    }
+    val fraction = { drag ?: if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f }
+    // the clock text only changes once a second, so it only recomposes once a second
+    val secs by remember { derivedStateOf { ((drag?.let { it * dur } ?: pos.toFloat()) / 1000).toLong() } }
+    val shade = androidx.compose.ui.graphics.Shadow(Color.Black.copy(.8f), Offset(0f, 1f), 6f)
+    val timeStyle = MaterialTheme.typography.labelLarge.copy(shadow = shade, fontFeatureSettings = "tnum")
+    Row(modifier.fillMaxWidth().padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton({ if (player.isPlaying) player.pause() else { if (player.playbackState == Player.STATE_ENDED) player.seekTo(0); player.play() } }) {
+            Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", Modifier.size(28.dp), tint = Color.White)
+        }
+        Text(clock(secs * 1000), color = Color.White, style = timeStyle)
+        SeekLine(
+            fraction,
+            onSeek = { drag = it }, onDone = { drag?.let { player.seekTo((it * dur).toLong()) }; drag = null },
+            modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+        )
+        Text(clock(dur), color = Color.White.copy(.8f), style = timeStyle)
+        if (hasSubs) IconButton({
+            subsOn = !subsOn
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, !subsOn).build()
+        }) { Icon(if (subsOn) Icons.Default.ClosedCaption else Icons.Default.ClosedCaptionDisabled, if (subsOn) "Hide subtitles" else "Show subtitles", tint = Color.White) }
+        IconButton({ muted = !muted; player.volume = if (muted) 0f else 1f }) {
+            Icon(if (muted) Icons.AutoMirrored.Outlined.VolumeOff else Icons.AutoMirrored.Outlined.VolumeUp, if (muted) "Unmute" else "Mute", tint = Color.White)
+        }
+    }
+}
+
+/** Thin white seek line with a small round knob; drag or tap to jump. */
+@Composable
+private fun SeekLine(fraction: () -> Float, onSeek: (Float) -> Unit, onDone: () -> Unit, modifier: Modifier) {
+    val seek by rememberUpdatedState(onSeek)
+    val done by rememberUpdatedState(onDone)
+    var active by remember { mutableStateOf(false) }
+    val knob by androidx.compose.animation.core.animateDpAsState(if (active) 8.dp else 6.dp, label = "knob")
+    Canvas(
+        modifier.height(32.dp)
+            .semantics { contentDescription = "Seek"; progressBarRangeInfo = ProgressBarRangeInfo(fraction(), 0f..1f) }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { active = true; seek((it.x / size.width).coerceIn(0f, 1f)) },
+                    onDragEnd = { active = false; done() }, onDragCancel = { active = false; done() },
+                ) { ch, _ -> ch.consume(); seek((ch.position.x / size.width).coerceIn(0f, 1f)) }
+            }
+            .pointerInput(Unit) { detectTapGestures { seek((it.x / size.width).coerceIn(0f, 1f)); done() } },
+    ) {
+        // read here, in drawing: the moving line only repaints, nothing re-measures
+        val y = size.height / 2; val x = size.width * fraction()
+        val stroke = (if (active) 5.dp else 3.dp).toPx()
+        drawLine(Color.White.copy(.3f), Offset(0f, y), Offset(size.width, y), stroke, androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(Color.White, Offset(0f, y), Offset(x, y), stroke, androidx.compose.ui.graphics.StrokeCap.Round)
+        drawCircle(Color.White, knob.toPx(), Offset(x, y))
+    }
+}
+
+/**
+ * New pan offset after zooming by [k] round screen point [c], for a layer that scales round [centre]:
+ * keeps whatever is under [c] exactly under [c] (so pinching zooms where the fingers are).
+ */
+fun zoomOffset(c: Offset, centre: Offset, k: Float, o: Offset) = (c - centre) * (1 - k) + o * k
