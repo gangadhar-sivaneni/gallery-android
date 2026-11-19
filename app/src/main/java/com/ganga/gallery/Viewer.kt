@@ -14,6 +14,10 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -139,6 +143,9 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
     val pipSupported = remember { ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE) }
 
     BackHandler(!slideshow && !videoLocked) { leave() }
+    var showInfo by remember { mutableStateOf(false) }
+    BackHandler(showInfo) { showInfo = false }
+    val photoPart by animateFloatAsState(if (showInfo) 0.45f else 1f, tween(260), label = "photoPart")
     BackHandler(slideshow) { slideshow = false; chrome = true }
     BackHandler(videoLocked) { vm.toast("Screen is locked. Tap the lock to unlock.") }
     ImmersiveMode(!chrome || videoLocked)
@@ -163,15 +170,18 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(
-            pager, Modifier.fillMaxSize(), key = { items[it].id }, beyondViewportPageCount = 1,
+            pager, Modifier.fillMaxWidth().fillMaxHeight(photoPart), key = { items[it].id }, beyondViewportPageCount = 1,
             userScrollEnabled = !videoLocked,
         ) { page ->
             val m = items[page]
             val current = page == pager.currentPage
             if (m.isVideo) VideoPage(vm, m, active = current && !slideshow, locked = videoLocked && current, aspect = aspect, speed = speed, controls = chrome) { chrome = it }
             else ZoomableImage(m, current, vm.imageEpoch) {
-                if (slideshow) slideshow = false
-                chrome = !chrome
+                when {
+                    showInfo -> showInfo = false
+                    slideshow -> slideshow = false
+                    else -> chrome = !chrome
+                }
             }
         }
 
@@ -270,8 +280,26 @@ fun Viewer(vm: GalleryViewModel, s: Screen.Viewer, ask: Ask, onBack: () -> Unit)
         }
 
         // like the phone's Photos app: round Share | Favourite · Edit · Delete pill | round Details
-        AnimatedVisibility(chrome && !videoLocked && !vm.inPip, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            val info = Act(Icons.Outlined.Info, "Details") { dialog = Dlg.Info(cur) }
+        // details panel fixed to the bottom; swiping the photo above changes what it shows
+        AnimatedVisibility(
+            showInfo && !vm.inPip, Modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically(tween(260)) { it }, exit = slideOutVertically(tween(220)) { it },
+        ) {
+            Surface(
+                Modifier.fillMaxWidth().fillMaxHeight(0.55f),
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp), color = MaterialTheme.colorScheme.surfaceContainer,
+            ) {
+                Column(Modifier.navigationBarsPadding()) {
+                    Box(Modifier.fillMaxWidth().padding(top = 10.dp), Alignment.Center) {
+                        Box(Modifier.size(36.dp, 4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outlineVariant))
+                    }
+                    InfoContent(vm, cur) { showInfo = false; vm.stack.add(Screen.Grid(Source.Bucket(cur.bucketId, cur.bucket))) }
+                }
+            }
+        }
+
+        AnimatedVisibility(chrome && !showInfo && !videoLocked && !vm.inPip, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
+            val info = Act(Icons.Outlined.Info, "Details") { showInfo = true }
             when {
                 external -> ViewerBar(
                     Act(Icons.Outlined.Share, "Share") { share(ctx, listOf(cur)) },

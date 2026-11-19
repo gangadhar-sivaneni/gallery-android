@@ -433,7 +433,8 @@ private fun TabPill(tabs: List<String>, selected: Int, onSelect: (Int) -> Unit) 
                     l,
                     Modifier.onPlaced { spots[i] = it.positionInParent().x to it.size.width.toFloat() }
                         .clip(CircleShape).selectable(sel, role = Role.Tab) { onSelect(i) }
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                        .width(80.dp).padding(vertical = 12.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 1,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
                     color = MaterialTheme.colorScheme.onSurface,

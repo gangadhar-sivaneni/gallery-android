@@ -11,8 +11,8 @@ android {
         applicationId = "com.ganga.gallery"
         minSdk = 30 // MediaStore trash/favorite APIs
         targetSdk = 36
-        versionCode = 4
-        versionName = "2.2"
+        versionCode = 5
+        versionName = "2.3"
     }
     buildTypes {
         release {

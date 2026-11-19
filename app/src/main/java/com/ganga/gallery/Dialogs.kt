@@ -134,14 +134,22 @@ private fun RenameDialog(m: Media, onDismiss: () -> Unit, onRename: (String) -> 
 private val FULL = DateTimeFormatter.ofPattern("EEE, d MMM yyyy · h:mm a")
 
 
-/** Details: the date up top, then two tidy cards: what the file is, and where it lives. */
+/** Details from the grid's Properties: the same panel as in the viewer, in a sheet. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun InfoSheet(vm: GalleryViewModel, m: Media, onDismiss: () -> Unit) {
-    val ctx = LocalContext.current
-    var exif by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    LaunchedEffect(m) { exif = withContext(Dispatchers.IO) { exifRows(ctx, m).toMap() } }
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+        InfoContent(vm, m) { onDismiss(); vm.stack.add(Screen.Grid(Source.Bucket(m.bucketId, m.bucket))) }
+    }
+}
+
+/** Date and time, then what the file is, then where it lives: rows on one solid surface, divided by thin lines. */
+@Composable
+fun InfoContent(vm: GalleryViewModel, m: Media, onOpenAlbum: () -> Unit) {
+    val ctx = LocalContext.current
+    var exif by remember(m.uri) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(m.uri) { exif = withContext(Dispatchers.IO) { exifRows(ctx, m).toMap() } }
     val at = Instant.ofEpochMilli(m.date).atZone(ZoneId.systemDefault())
     val kind = when {
         m.isVideo -> "Video"
@@ -154,37 +162,26 @@ private fun InfoSheet(vm: GalleryViewModel, m: Media, onDismiss: () -> Unit) {
         if (m.isVideo) clock(m.duration) else null,
         m.mime.substringAfter('/').uppercase().takeIf { it.isNotBlank() && it != "*" },
     ).joinToString("  ·  ")
-    val album = m.bucketId != -1L
-    fun openAlbum() { onDismiss(); vm.stack.add(Screen.Grid(Source.Bucket(m.bucketId, m.bucket))) }
-    ModalBottomSheet(onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.background) {
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
-            Text(DAY_LONG.format(at), Modifier.padding(start = 4.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(TIME_ONLY.format(at), Modifier.padding(start = 4.dp, bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            InfoCard {
-                InfoRow(
-                    when { m.isVideo -> Icons.Outlined.Videocam; kind == "Screenshot" -> Icons.Outlined.Screenshot; else -> Icons.Outlined.PhotoCamera },
-                    kind, specs,
-                )
-                InfoRow(Icons.Outlined.InsertDriveFile, m.name, Formatter.formatShortFileSize(ctx, m.size).takeIf { m.size > 0 })
-                exif["Exposure"]?.let { InfoRow(Icons.Outlined.Camera, it, null) }
-                InfoRow(Icons.Outlined.LocationOn, exif["Location"] ?: "No location information", null, last = true)
-            }
-            if (album) {
-                Spacer(Modifier.height(12.dp))
-                InfoCard {
-                    InfoRow(Icons.Outlined.PhotoAlbum, vm.albumName(m.bucketId, m.bucket), "Phone/${m.path}", last = true, onClick = ::openAlbum)
-                }
-            }
+    val line = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .7f)
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
+            Text(DAY_LONG.format(at), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(TIME_ONLY.format(at), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        HorizontalDivider(color = line)
+        InfoRow(
+            when { m.isVideo -> Icons.Outlined.Videocam; kind == "Screenshot" -> Icons.Outlined.Screenshot; else -> Icons.Outlined.PhotoCamera },
+            kind, specs,
+        )
+        InfoRow(Icons.Outlined.InsertDriveFile, m.name, Formatter.formatShortFileSize(ctx, m.size).takeIf { m.size > 0 })
+        exif["Exposure"]?.let { InfoRow(Icons.Outlined.Camera, it, null) }
+        InfoRow(Icons.Outlined.LocationOn, exif["Location"] ?: "No location information", null, last = m.bucketId == -1L)
+        if (m.bucketId != -1L) InfoRow(Icons.Outlined.PhotoAlbum, vm.albumName(m.bucketId, m.bucket), "Phone/${m.path}", last = true, onClick = onOpenAlbum)
     }
 }
 
 private val DAY_LONG = DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy")
 private val TIME_ONLY = DateTimeFormatter.ofPattern("h:mm a")
-
-@Composable
-private fun InfoCard(content: @Composable ColumnScope.() -> Unit) =
-    Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainer) { Column(content = content) }
 
 /** One compact details row: icon, value, small grey line under it; a chevron when it opens something. */
 @Composable
@@ -195,7 +192,7 @@ private fun InfoRow(
     Column {
         Row(
             Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-                .padding(horizontal = 16.dp, vertical = 11.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -205,7 +202,7 @@ private fun InfoRow(
             }
             if (onClick != null) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (!last) HorizontalDivider(Modifier.padding(start = 54.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
+        if (!last) HorizontalDivider(Modifier.padding(start = 58.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .7f))
     }
 }
 
